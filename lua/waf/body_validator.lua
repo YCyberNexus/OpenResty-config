@@ -34,6 +34,9 @@ function BodyValidator:validate(body)
       return reject("schema", tostring(k), "unknown field")
     end
   end
+  -- TODO(P3, 安全基线)：当前只深校 messages；allowed_fields 里其它字段(stop/user/数值等)仅过了
+  -- "字段名白名单"、未校类型与边界(如 stop 可为超大数组、不受 max_content_length 约束)。目标约束见
+  -- schemas/chat_completions.schema.json(stop maxItems 4、数值 range)，P3-3 迁移到 jsonschema 时收口。
   if body.messages == nil then
     return reject("schema", "messages", "messages is required")
   end

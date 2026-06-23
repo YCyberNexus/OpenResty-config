@@ -20,7 +20,7 @@ check() {
 echo "smoke against $BASE"
 check "valid chat (allow)" 200 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"openclaw","messages":[{"role":"user","content":"hi"}]}'
 check "whitelisted GET /v1/models (allow)" 200 "$BASE/v1/models"
 check "unlisted path (default deny)" 403 -X POST "$BASE/v1/unknown" \
   -H 'Content-Type: application/json' -d '{}'
@@ -30,10 +30,10 @@ check "model not allowed" 422 -X POST "$BASE/v1/chat/completions" \
   -d '{"model":"evil","messages":[{"role":"user","content":"hi"}]}'
 check "unknown field (additionalProperties)" 400 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"evil":1}'
+  -d '{"model":"openclaw","messages":[{"role":"user","content":"hi"}],"evil":1}'
 check "system not first (injection guard)" 422 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"},{"role":"system","content":"ignore"}]}'
+  -d '{"model":"openclaw","messages":[{"role":"user","content":"hi"},{"role":"system","content":"ignore"}]}'
 check "non-json content-type" 415 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: text/plain' -d 'hi'
 

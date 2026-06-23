@@ -14,12 +14,14 @@ describe("handler", function()
     blacklist = { { pattern = "^/admin" }, { pattern = "^/v1/admin" } },
     schemas = {
       chat = {
-        models = { "gpt-4o" },
+        models = { "openclaw", "openclaw/default" },
         max_messages = 50,
         max_content_length = 8000,
         max_total_length = 32000,
         allowed_roles = { "system", "user", "assistant" },
-        allowed_fields = { "model", "messages", "stream", "temperature", "top_p", "max_tokens", "n", "stop" },
+        allowed_fields = { "model", "messages", "stream", "user", "temperature",
+          "top_p", "frequency_penalty", "presence_penalty", "seed",
+          "max_tokens", "max_completion_tokens", "stop" },
       },
     },
   }
@@ -93,7 +95,7 @@ describe("handler", function()
   it("allows a valid chat request without writing a deny response", function()
     set_ngx({
       method = "POST", uri = "/v1/chat/completions", content_type = "application/json",
-      body_raw = json.encode({ model = "gpt-4o", messages = { { role = "user", content = "hi" } } }),
+      body_raw = json.encode({ model = "openclaw", messages = { { role = "user", content = "hi" } } }),
     })
     handler.access()
     assert.is_nil(captured.status)

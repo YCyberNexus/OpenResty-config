@@ -1,13 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$comment": "OpenAI Chat Completions 请求体的标准 JSON Schema 草稿。当前起步骨架用 lua/waf/body_validator.lua（自研校验器）实现等价约束；本文件是方案 P3-3 迁移到 lua-resty-jsonschema 的目标。数值上限待接口契约（方案搁置项 5）确认后据实收紧。",
+  "$comment": "OpenClaw OpenAI 兼容 Chat Completions 请求体的 JSON Schema 草稿。字段集与 conf/waf_rules.lua 的 schemas.chat 对齐（model 形如 openclaw/<agentId>；刻意不含 tools/tool_choice，也不含 n）。当前起步骨架用 lua/waf/body_validator.lua（自研校验器）实现等价约束；本文件是方案 P3-3 迁移到 lua-resty-jsonschema 的目标。model 取值与数值上限待接口契约（方案搁置项 5）确认后据实收紧。",
   "type": "object",
   "additionalProperties": false,
   "required": ["model", "messages"],
   "properties": {
     "model": {
       "type": "string",
-      "enum": ["gpt-4o", "gpt-4o-mini", "claude-opus-4-8"]
+      "enum": ["openclaw", "openclaw/default"]
     },
     "messages": {
       "type": "array",
@@ -25,10 +25,14 @@
       }
     },
     "stream": { "type": "boolean" },
+    "user": { "type": "string", "maxLength": 256 },
     "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
     "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
+    "frequency_penalty": { "type": "number", "minimum": -2, "maximum": 2 },
+    "presence_penalty": { "type": "number", "minimum": -2, "maximum": 2 },
+    "seed": { "type": "integer" },
     "max_tokens": { "type": "integer", "minimum": 1, "maximum": 8192 },
-    "n": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "max_completion_tokens": { "type": "integer", "minimum": 1, "maximum": 8192 },
     "stop": {
       "anyOf": [
         { "type": "string" },

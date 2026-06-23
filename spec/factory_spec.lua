@@ -15,7 +15,7 @@ describe("factory", function()
     },
     schemas = {
       chat = {
-        models = { "gpt-4o" },
+        models = { "openclaw", "openclaw/default" },
         max_messages = 50,
         max_content_length = 8000,
         max_total_length = 32000,
@@ -40,7 +40,7 @@ describe("factory", function()
     local r = d:evaluate({
       method = "POST",
       path = "/v1/chat/completions",
-      body = { model = "gpt-4o", messages = { { role = "user", content = "hi" } } },
+      body = { model = "openclaw", messages = { { role = "user", content = "hi" } } },
     })
     assert.are.equal("allow", r.action)
   end)

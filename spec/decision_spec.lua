@@ -18,12 +18,14 @@ describe("decision", function()
       { path = "/v1/admin" },
     })
     local chat = BodyValidator.new({
-      models = { "gpt-4o" },
+      models = { "openclaw", "openclaw/default" },
       max_messages = 50,
       max_content_length = 8000,
       max_total_length = 32000,
       allowed_roles = { "system", "user", "assistant" },
-      allowed_fields = { "model", "messages", "stream", "temperature", "top_p", "max_tokens", "n", "stop" },
+      allowed_fields = { "model", "messages", "stream", "user", "temperature",
+        "top_p", "frequency_penalty", "presence_penalty", "seed",
+        "max_tokens", "max_completion_tokens", "stop" },
     })
     return Decision.new({ whitelist = whitelist, blacklist = blacklist, validators = { chat = chat } })
   end
@@ -48,7 +50,7 @@ describe("decision", function()
   end)
 
   it("denies a whitelisted request whose body fails validation", function()
-    local r = build():evaluate({ method = "POST", path = "/v1/chat/completions", body = { model = "gpt-4o" } })
+    local r = build():evaluate({ method = "POST", path = "/v1/chat/completions", body = { model = "openclaw" } })
     assert.are.equal("deny", r.action)
     assert.are.equal("body", r.reason)
   end)
@@ -57,7 +59,7 @@ describe("decision", function()
     local r = build():evaluate({
       method = "POST",
       path = "/v1/chat/completions",
-      body = { model = "gpt-4o", messages = { { role = "user", content = "hi" } } },
+      body = { model = "openclaw", messages = { { role = "user", content = "hi" } } },
     })
     assert.are.equal("allow", r.action)
   end)
