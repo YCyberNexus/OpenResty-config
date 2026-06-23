@@ -28,7 +28,7 @@ check "blacklisted /v1/admin" 403 "$BASE/v1/admin"
 check "model not allowed" 422 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"evil","messages":[{"role":"user","content":"hi"}]}'
-check "unknown field (additionalProperties)" 422 -X POST "$BASE/v1/chat/completions" \
+check "unknown field (additionalProperties)" 400 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"evil":1}'
 check "system not first (injection guard)" 422 -X POST "$BASE/v1/chat/completions" \

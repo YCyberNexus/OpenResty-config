@@ -8,27 +8,28 @@ conf/waf_rules.lua
 
 > **改这一个文件就够了。** `lua/waf/*.lua` 是规则引擎，**不要动**；`conf/nginx.conf` 属于网络/上游配置（端口、`proxy_pass`、证书），改动影响面更大、需更谨慎。本指南只讲 `conf/waf_rules.lua`。
 
-**先进项目目录再操作**——本文所有相对路径（`conf/...`、`scripts/...`、`make ...`）都相对项目根目录：
+**先进项目目录再操作**——本文所有相对路径（`conf/...`、`scripts/...`、`openresty -c conf/...`）都相对项目根目录：
 
 ```bash
 cd /opt/openresty-waf        # 服务器上的部署目录（开发机上则是仓库根目录）
 ```
 
-每次改完，走这套三层校验（缺一不可）：
+每次改完，走这套「三项检查 + 热加载」（缺一不可）：
 
 ```bash
-make lint        # ① 配置体检：引用一致性 / 必填 / method 大小写 / 黑白冲突…（抓 -t 抓不到的坑）
-openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t   # ② 语法 + 能否加载
-sudo systemctl reload openresty-waf                       # ③ 通过才热加载生效
-bash scripts/smoke.sh                                     # ④ 真实请求验证
+/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua  # ① 配置体检：引用一致性 / 必填 / method 大小写 / 黑白冲突…（抓 -t 抓不到的坑）
+openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t           # ② 语法 + 能否加载
+sudo systemctl reload openresty-waf                              # ③ 前两项通过才热加载生效
+bash scripts/smoke.sh                                            # ④ 真实请求检查
 ```
 
-> 🚑 **红线（最重要的一条）**：只要 `make lint` 报 **ERROR** 或 `-t` 不通过，**绝对不要 reload，更不要 `systemctl restart` / 重启机器**。此刻现网仍在正常服务——回去按报错改好、重新校验通过为止。
+> 🚑 **红线（最重要的一条）**：只要配置体检报 **ERROR** 或 `-t` 不通过，**绝对不要 reload，更不要 `systemctl restart` / 重启机器**。此刻现网仍在正常服务——回去按报错改好、重新校验通过为止。
 >
 > 原因是 `waf_rules.lua` 在进程启动时由 `init_by_lua` 加载，**配置写错会让整个 WAF 起不来（fail-closed，不是降级放行）**。`reload` 时 nginx 会先测新配置、测不过就拒绝 reload 并让旧进程继续服务，所以坏配置不会立刻中断现网；真正的灾难是**进程重启**（机器重启 / `restart` / 崩溃拉起）时撞上坏配置——那时 WAF 直接拒绝启动。所以「先校验、再 reload」是硬要求。
 
-> 若服务器上 `make` / `luajit` / `openresty` 不在 PATH：
-> - `make lint` 的等价直接命令：`/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua`
+> `make lint` 是开发机/带 Makefile 环境的快捷方式；离线部署包里不带 `Makefile`，服务器上优先直接跑 `/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua`。
+>
+> 若服务器上 `luajit` / `openresty` 不在 PATH：
 > - 配置校验：`/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t`
 > - `systemctl` 操作一般需要 `sudo`；reload 失败看原因：`tail -n 50 logs/error.log` 或 `journalctl -u openresty-waf -e`
 
@@ -46,19 +47,27 @@ return {
 }
 ```
 
-**一次请求的判定顺序**（改任何一处前，先理解这个流程）：
+**一次请求的判定顺序**（严格按当前代码；改任何一处前，先理解这个流程）：
 
 ```
-请求 ──> ① 黑名单匹配? ──命中──> 403 (reason=blacklist)
-            │未命中
-            ▼
-         ② 白名单匹配? ──未命中──> 403 (reason=not_in_whitelist)   ← 默认拒绝
-            │命中某条规则
-            ▼
-         ③ 该规则有 body=? ──无──> 放行 200
-            │有
-            ▼
-         body JSON 校验 ──不过──> 400/422 ──过──> 放行 200
+请求
+  │
+  ├─ 方法是 POST/PUT/PATCH? ──是──> Content-Type 包含 application/json? ──否──> 415
+  │                                  │是
+  │                                  ▼
+  │                               读取 body；若非空且 JSON 解析失败 ───────> 400
+  │
+  ▼
+① 黑名单匹配? ──命中──> 403 (reason=blacklist)
+  │未命中
+  ▼
+② 白名单匹配? ──未命中──> 403 (reason=not_in_whitelist)   ← 默认拒绝
+  │命中某条规则
+  ▼
+③ 该规则有 body=? ──无──> 放行 200
+  │有
+  ▼
+body schema 校验 ──不过──> 400/422 ──过──> 放行 200
 ```
 
 ---
@@ -82,9 +91,9 @@ whitelist = {
 | `body` | 否 | 指向 `schemas` 里某个校验器的名字；命中后对请求体做该校验。无此字段则不校验 body |
 
 要点：
-- `path` 和 `pattern` **二选一**。两个都写 → **`path` 优先、`pattern` 被忽略**（`make lint` 警告）。
-- 两个都不写 → 该规则**永远不命中**，等于没配（`make lint` 报 error）。
-- `body` 只对**有请求体的方法**（POST/PUT/PATCH）有意义。给 GET 配 `body` 会让该 GET 请求全部 400（GET 不读 body，`body` 为 `nil` 被判非对象）——`make lint` 现在会报 error。
+- `path` 和 `pattern` **二选一**。两个都写 → **`path` 优先、`pattern` 被忽略**（配置体检警告）。
+- 两个都不写 → 该规则**永远不命中**，等于没配（配置体检报 error）。
+- `body` 只对**有请求体的方法**（POST/PUT/PATCH）有意义。给 GET 配 `body` 会让该 GET 请求全部 400（GET 不读 body，`body` 为 `nil` 被判非对象）——配置体检现在会报 error。
 
 ---
 
@@ -102,7 +111,7 @@ blacklist = {
 要点：
 - 黑名单**先于**白名单判。即使某路径在白名单里，只要也命中黑名单就拒——用它兜底拦管理端点、危险路径。
 - `^/admin` 是**前缀正则**（没有 `$`），会匹配 `/admin`、`/admin/x`，**也会匹配 `/admin-console`、`/administrator`**。只想精确拦 `/admin` 用 `path = "/admin"` 或 `pattern = "^/admin$"`。
-- ⚠️ 黑名单的 `methods` 若写错（小写、或漏花括号写成标量 `"GET"`），这条拦截会**静默失效形成绕过**。`make lint` 现在会对此报 error。
+- ⚠️ 黑名单的 `methods` 若写错（小写、或漏花括号写成标量 `"GET"`），这条拦截会**静默失效形成绕过**。配置体检现在会对此报 error。
 
 ---
 
@@ -133,7 +142,7 @@ schemas = {
 | `max_content_length` | **是，正整数** | 单条 message `content` 字节数上限 |
 | `max_total_length` | **是，正整数** | 所有 message `content` 累计字节数上限 |
 
-> ⚠️ 三个 `max_*` 必须是**大于 0 的整数**：漏配或写成非数字 → 正常请求（能过前面校验的）走到长度比较处 500；配成 0 或负数 → 该接口正常请求被全拒（422）。`make lint` 两种都会报 error。
+> ⚠️ 三个 `max_*` 必须是**大于 0 的整数**：漏配或写成非数字 → 正常请求（能过前面校验的）走到长度比较处 500；配成 0 或负数 → 该接口正常请求被全拒（422）。配置体检两种都会报 error。
 
 **校验顺序**（严格按代码，便于对照日志里的 `field`）：
 1. 请求体必须是 JSON 对象（否则 400）；
@@ -176,7 +185,7 @@ my_schema = {
 | 422 | `body`（code=policy） | body **策略**错：model 不允许 / 条数超限 / 长度超限 / **role 非法** / **system 不在首位** |
 | 500 | `misconfigured` | **配置错**：白名单 `body=` 指向了不存在的 schema |
 
-> 看到 **500**（`misconfigured` 或正常请求 500）几乎都是 `waf_rules.lua` 配错——回第 4 节核对 schema 名字与 `max_*`，用 `make lint` 一键定位。
+> 看到 **500**（`misconfigured` 或正常请求 500）几乎都是 `waf_rules.lua` 配错——回第 4 节核对 schema 名字与 `max_*`，用配置体检一键定位。
 
 ---
 
@@ -263,17 +272,17 @@ models = { "gpt-4o", "gpt-4o-mini", "claude-opus-4-8", "claude-sonnet-4-6" },
 
 ---
 
-## 8. 改完怎么确保没配错（三层校验）
+## 8. 改完怎么确保没配错（三项检查 + 热加载）
 
 三个工具各管一段，**盲区互补，建议都跑**：
 
 | 命令 | 抓什么 | 抓不到什么 |
 |---|---|---|
-| `make lint`（= `luajit scripts/check_rules.lua`） | Lua 语法、**body 引用的 schema 是否存在**、`allowed_fields` 是否含 model/messages、`max_*` 是否为正整数、`allowed_roles` 是否含 user、**method 是否大写合法**、**body 是否误配给 GET**、**黑白名单 path 冲突**、**同 path 规则短路 body 校验** | 规则是否「符合业务意图」 |
+| `/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua`（开发机可用 `make lint`） | Lua 语法、**body 引用的 schema 是否存在**、`allowed_fields` 是否含 model/messages、`max_*` 是否为正整数、`allowed_roles` 是否含 user、**method 是否大写合法**、**body 是否误配给 GET**、**黑白名单 path 冲突**、**同 path 规则短路 body 校验** | 规则是否「符合业务意图」 |
 | `openresty ... -t` | nginx 语法、`init_by_lua` 能否加载（`require` 成功） | **不查 body 引用一致性**、不实际发请求、不感知 method 大小写/HTTP 语义 |
 | `bash scripts/smoke.sh` | 端到端：真实请求的放行/拦截是否符合预期 | 只覆盖脚本里写的用例 |
 
-`make lint` 的核心价值：`openresty -t` 启动时**不会**真的判一条请求，所以「`body="chat"` 但 schemas 里其实叫 `chatt`」「method 写成小写 `"post"`」这类错 `-t` 发现不了——要等真实请求打进来才 500/全拒。`make lint` 把这些在改完当场抓出来，例如：
+配置体检的核心价值：`openresty -t` 启动时**不会**真的判一条请求，所以「`body="chat"` 但 schemas 里其实叫 `chatt`」「method 写成小写 `"post"`」这类错 `-t` 发现不了——要等真实请求打进来才 500/全拒。配置体检把这些在改完当场抓出来，例如：
 
 ```
 ✗ ERROR  whitelist[1]  body 引用了不存在的 schema："chatt"；该接口所有请求会 500（misconfigured）
@@ -287,9 +296,9 @@ ls -l conf/waf_rules.lua.bak.* 2>/dev/null                        # 看下已有
 cp conf/waf_rules.lua "conf/waf_rules.lua.bak.$(date +%Y%m%d%H%M)" # ① 改前备份（bash 下执行）
 ls -l conf/waf_rules.lua.bak.*                                     #    确认备份文件名/大小正常
 vi /opt/openresty-waf/conf/waf_rules.lua                           # ② 改（用绝对路径，别改错文件）
-make lint                                                          # ③ 体检——有 ERROR 就停下改，别往下走
+/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua     # ③ 体检——有 ERROR 就停下改，别往下走
 openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t             # ④ 语法 + 加载校验
-sudo systemctl reload openresty-waf                                # ⑤ 前两步都过，才热加载
+sudo systemctl reload openresty-waf                                # ⑤ 前两项都过，才热加载
 bash scripts/smoke.sh                                              # ⑥ 实测
 ```
 
@@ -299,7 +308,8 @@ bash scripts/smoke.sh                                              # ⑥ 实测
 ```bash
 ls -lt conf/waf_rules.lua.bak.*                                   # ① 按时间挑最新的好备份
 cp conf/waf_rules.lua.bak.<时间戳> conf/waf_rules.lua             # ② 拷回
-make lint && openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t   # ③ 先确认备份本身是好的
+/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua \
+  && openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t           # ③ 先确认备份本身是好的
 sudo systemctl reload openresty-waf                              # ④ 通过才 reload
 bash scripts/smoke.sh                                            # ⑤ 实测
 ```
@@ -310,15 +320,15 @@ bash scripts/smoke.sh                                            # ⑤ 实测
 
 | 现象 | 原因 | 修 |
 |---|---|---|
-| 某接口所有请求 **500 misconfigured** | 白名单 `body="x"` 但 `schemas` 没有 `x`（拼写/漏定义） | 名字对齐；`make lint` 当场抓 |
+| 某接口所有请求 **500 misconfigured** | 白名单 `body="x"` 但 `schemas` 没有 `x`（拼写/漏定义） | 名字对齐；配置体检当场抓 |
 | 正常请求 500 | schema 漏配 `max_*`，或写成 `"50"`（带引号的字符串） | 三个 `max_*` 都填**不带引号的正整数** |
 | 正常请求全 **400 unknown field** | `allowed_fields` 漏了请求里用到的字段（尤其 `model`/`messages`） | 补进 `allowed_fields` |
 | 正常对话全 **422** | `allowed_roles` 漏了 `user`，或某 `model` 不在 `models`，或 `max_*` 配成 0/负数 | 补 `user` / 补 model / `max_*` 改正整数 |
-| 规则**写了却不生效** | `path` 和 `pattern` 都写了（path 优先），或两个都没写，或 method 写成小写 | 二选一；method 大写；`make lint` 提示 |
-| 白名单接口被 **403 全拒** | 该 path 同时命中黑名单（黑名单先判），或 method 配错 | 查黑名单遮蔽 / 改 method；`make lint` 抓 path 冲突 |
-| 黑名单**没拦住** | 黑名单 method 写成小写或标量，规则失效 | method 用大写数组；`make lint` 抓 |
-| body 校验**被绕过** | 同一 path 配了多条规则，靠前那条没挂 body 短路了校验 | 合并规则；`make lint` 报短路 error |
-| 改完 reload 报错、没生效 | `waf_rules.lua` 语法错（少逗号、`"\d"` 转义、方括号） | 先 `make lint` / `-t`，按报错改；现网不受影响（旧进程还在）→ **不要 restart** |
+| 规则**写了却不生效** | `path` 和 `pattern` 都写了（path 优先），或两个都没写，或 method 写成小写 | 二选一；method 大写；配置体检提示 |
+| 白名单接口被 **403 全拒** | 该 path 同时命中黑名单（黑名单先判），或 method 配错 | 查黑名单遮蔽 / 改 method；配置体检可查 path 冲突 |
+| 黑名单**没拦住** | 黑名单 method 写成小写或标量，规则失效 | method 用大写数组；配置体检可查 |
+| body 校验**被绕过** | 同一 path 配了多条规则，靠前那条没挂 body 短路了校验 | 合并规则；配置体检报短路 error |
+| 改完 reload 报错、没生效 | `waf_rules.lua` 语法错（少逗号、`"\d"` 转义、方括号） | 先配置体检 / `-t`，按报错改；现网不受影响（旧进程还在）→ **不要 restart** |
 
 ---
 
