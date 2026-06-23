@@ -21,8 +21,20 @@ conf/
 schemas/
   chat_completions.schema.json   标准 JSON Schema 草稿（P3-3 迁移目标）
 spec/                 测试（纯 LuaJIT 可跑的 busted 风格框架）
-scripts/smoke.sh      curl 冒烟测试
+scripts/
+  smoke.sh            curl 冒烟测试
+  package.sh          Mac 端打包（离线部署，挑运行期文件 + 统一 LF）
+  server-setup.sh     服务器端环境准备（建 logs / 设权限 / openresty -t 预检）
+  check_rules.lua     配置体检（make lint 调用）
+deploy/openresty-waf.service   systemd 服务单元
+docs/                 文档（见下方「文档」一节）
 ```
+
+## 文档
+
+- [流量安全网关方案-工作分析](docs/流量安全网关方案-工作分析.md) —— 完整工作分析：P0–P7 工作分解、OpenClaw 接口画像、风险与待澄清项。
+- [离线部署教程](docs/离线部署教程.md) —— 无外网 CentOS 服务器的部署与使用全流程（详见下文「[离线部署到服务器（CentOS）](#离线部署到服务器centos)」）。
+- [WAF 规则配置指南](docs/WAF规则配置指南.md) —— 运维维护 `conf/waf_rules.lua` 的配置手册（详见下文「[规则配置（给运维团队）](#规则配置给运维团队)」）。
 
 ## 跑测试（只需 luajit）
 
