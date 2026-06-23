@@ -12,6 +12,7 @@ describe("handler", function()
       { methods = { "GET" }, path = "/v1/models" },
     },
     blacklist = { { pattern = "^/admin" }, { pattern = "^/v1/admin" } },
+    forbidden_headers = { "x-openclaw-model" },
     schemas = {
       chat = {
         models = { "openclaw", "openclaw/default" },
@@ -41,6 +42,8 @@ describe("handler", function()
         get_method = function() return req.method end,
         read_body = function() end,
         get_body_data = function() return req.body_raw end,
+        get_body_file = function() return req.body_file end,
+        get_headers = function() return req.headers or {}, req.headers_err end,
       },
       re = {
         find = function(s, pat) return (string.find(s, pat)) end,
@@ -106,5 +109,38 @@ describe("handler", function()
     set_ngx({ method = "GET", uri = "/v1/models" })
     handler.access()
     assert.is_nil(captured.status)
+  end)
+
+  it("returns 403 forbidden_header when x-openclaw-model is present (model allowlist bypass guard)", function()
+    set_ngx({
+      method = "POST", uri = "/v1/chat/completions", content_type = "application/json",
+      headers = { ["x-openclaw-model"] = "openclaw/secret" },
+      -- body 本身合法（openclaw 在该测试内联白名单里）,仅因夹带覆盖头被先行拦下
+      body_raw = json.encode({ model = "openclaw", messages = { { role = "user", content = "hi" } } }),
+    })
+    handler.access()
+    assert.are.equal(403, captured.status)
+    assert.are.equal("forbidden_header", json.decode(captured.body).error)
+  end)
+
+  it("returns 413 body_too_large when the body spilled to a temp file (fail-closed)", function()
+    set_ngx({
+      method = "POST", uri = "/v1/chat/completions", content_type = "application/json",
+      body_raw = nil, body_file = "/tmp/0001",   -- get_body_data()==nil 但落盘了
+    })
+    handler.access()
+    assert.are.equal(413, captured.status)
+    assert.are.equal("body_too_large", json.decode(captured.body).error)
+  end)
+
+  it("returns 400 too_many_headers when request headers were truncated (fail-closed)", function()
+    set_ngx({
+      method = "POST", uri = "/v1/chat/completions", content_type = "application/json",
+      headers = {}, headers_err = "truncated",
+      body_raw = json.encode({ model = "openclaw", messages = { { role = "user", content = "hi" } } }),
+    })
+    handler.access()
+    assert.are.equal(400, captured.status)
+    assert.are.equal("too_many_headers", json.decode(captured.body).error)
   end)
 end)

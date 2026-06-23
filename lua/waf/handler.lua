@@ -28,6 +28,7 @@ function _M.access()
   local method = ngx.req.get_method()
   local path = ngx.var.uri
   local request_id = ngx.var.request_id
+  local headers, headers_err = ngx.req.get_headers()  -- 第二返回值 "truncated" 表示头条数超上限被截断
   local body
 
   if has_body(method) then
@@ -38,9 +39,14 @@ function _M.access()
     end
     ngx.req.read_body()
     local raw = ngx.req.get_body_data()
-    -- raw == nil 可能是空 body，也可能是 body 落盘（须把 client_body_buffer_size
-    -- 调到与 client_max_body_size 一致来规避，见方案 P3-1）。起步骨架按空 body 处理。
-    if raw ~= nil then
+    if raw == nil then
+      -- raw==nil 有两种：真空 body，或 body 落盘（超过 client_body_buffer_size）。
+      -- 落盘时内存里读不到内容、无法校验——必须拒绝，绝不当空 body 放行（fail-closed，方案 P3-1）。
+      if ngx.req.get_body_file() ~= nil then
+        return respond(413, { error = "body_too_large", request_id = request_id })
+      end
+      -- 否则为真正的空 body，body 保持 nil 交给后续规则判定。
+    else
       local parsed = cjson.decode(raw)
       if parsed == nil then
         return respond(400, { error = "invalid_json", request_id = request_id })
@@ -49,7 +55,10 @@ function _M.access()
     end
   end
 
-  local r = decision:evaluate({ method = method, path = path, body = body })
+  local r = decision:evaluate({
+    method = method, path = path, body = body,
+    headers = headers, headers_truncated = (headers_err == "truncated"),
+  })
 
   ngx.log(ngx.INFO, "waf action=", r.action,
     " method=", method, " path=", path,

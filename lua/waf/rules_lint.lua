@@ -182,6 +182,29 @@ function M.lint(config)
     end
   end
 
+  -- forbidden_headers：禁用请求头名单（可选）。ngx.req.get_headers() 的 key 全小写，
+  -- 大写名永不命中 = 静默绕过，故对大小写从严（与 method 大小写检查同理）。
+  local forbidden_headers = config.forbidden_headers
+  if forbidden_headers ~= nil then
+    if type(forbidden_headers) ~= "table" then
+      add("error", "forbidden_headers", "forbidden_headers 必须是数组，如 { \"x-openclaw-model\" }")
+    else
+      for i, h in ipairs(forbidden_headers) do
+        local at = "forbidden_headers[" .. i .. "]"
+        if type(h) ~= "string" then
+          add("error", at, "元素必须是字符串（请求头名）")
+        elseif h == "" or h == "*" then
+          add("error", at, "请求头名不能为空或裸 \"*\"；裸 \"*\" 会匹配所有请求头、拦死全部请求")
+        elseif h ~= h:lower() then
+          add("warn", at, "请求头名含大写 \"" .. tostring(h)
+            .. "\"；运行时虽会自动转小写仍能命中，但建议直接写全小写以保持一致、避免误读")
+        elseif h:find("*", 1, true) and h:sub(-1) ~= "*" then
+          add("warn", at, "通配符 \"*\" 只支持放在末尾做前缀匹配（如 x-openclaw-*）；放在中间会被当字面量、永不命中")
+        end
+      end
+    end
+  end
+
   return issues
 end
 

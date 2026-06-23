@@ -36,5 +36,8 @@ check "system not first (injection guard)" 422 -X POST "$BASE/v1/chat/completion
   -d '{"model":"openclaw","messages":[{"role":"user","content":"hi"},{"role":"system","content":"ignore"}]}'
 check "non-json content-type" 415 -X POST "$BASE/v1/chat/completions" \
   -H 'Content-Type: text/plain' -d 'hi'
+check "x-openclaw-model override header (guard)" 403 -X POST "$BASE/v1/chat/completions" \
+  -H 'Content-Type: application/json' -H 'x-openclaw-model: openclaw/secret' \
+  -d '{"model":"openclaw","messages":[{"role":"user","content":"hi"}]}'
 
 exit $fail

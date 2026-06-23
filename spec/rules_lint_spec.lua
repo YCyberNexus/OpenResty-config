@@ -144,4 +144,46 @@ describe("rules_lint", function()
     end
     assert.is_false(bypass)
   end)
+
+  it("passes a config whose forbidden_headers are valid lowercase names", function()
+    local c = valid_config()
+    c.forbidden_headers = { "x-openclaw-model" }
+    assert.are.equal(0, errors(lint.lint(c)))
+  end)
+
+  it("flags forbidden_headers that is not an array", function()
+    local c = valid_config()
+    c.forbidden_headers = "x-openclaw-model"
+    assert.is_true(has(lint.lint(c), "error", "数组"))
+  end)
+
+  it("warns about an uppercase forbidden header name (style, runtime still normalizes)", function()
+    local c = valid_config()
+    c.forbidden_headers = { "X-OpenClaw-Model" }
+    assert.is_true(has(lint.lint(c), "warn", "小写"))
+  end)
+
+  it("treats an uppercase forbidden header as warn, not error (runtime lowercases it)", function()
+    local c = valid_config()
+    c.forbidden_headers = { "X-OpenClaw-Model" }
+    assert.are.equal(0, errors(lint.lint(c)))
+  end)
+
+  it("flags a non-string forbidden header element", function()
+    local c = valid_config()
+    c.forbidden_headers = { 123 }
+    assert.is_true(has(lint.lint(c), "error", "字符串"))
+  end)
+
+  it("flags a bare \"*\" forbidden header (would block all requests)", function()
+    local c = valid_config()
+    c.forbidden_headers = { "*" }
+    assert.is_true(has(lint.lint(c), "error", "拦死"))
+  end)
+
+  it("warns about a misplaced wildcard in a forbidden header name", function()
+    local c = valid_config()
+    c.forbidden_headers = { "x-*-model" }
+    assert.is_true(has(lint.lint(c), "warn", "通配符"))
+  end)
 end)

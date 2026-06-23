@@ -14,7 +14,12 @@ function factory.build_decision(config, regex_match)
   for name, schema in pairs(config.schemas or {}) do
     validators[name] = BodyValidator.new(schema)
   end
-  return Decision.new({ whitelist = whitelist, blacklist = blacklist, validators = validators })
+  return Decision.new({
+    whitelist = whitelist,
+    blacklist = blacklist,
+    validators = validators,
+    forbidden_headers = config.forbidden_headers,
+  })
 end
 
 return factory

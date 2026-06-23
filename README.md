@@ -17,7 +17,7 @@ lua/waf/
   rules_lint.lua      配置体检（静态检查 waf_rules，抓 openresty -t 抓不到的引用/必填错）
 conf/
   nginx.conf          OpenResty 配置（init_by_lua 构建决策器 + access_by_lua 挂 WAF）
-  waf_rules.lua       规则定义（白名单/黑名单/schemas）
+  waf_rules.lua       规则定义（白名单/黑名单/forbidden_headers/schemas）
 schemas/
   chat_completions.schema.json   标准 JSON Schema 草稿（P3-3 迁移目标）
 spec/                 测试（纯 LuaJIT 可跑的 busted 风格框架）
@@ -42,7 +42,7 @@ docs/                 文档（见下方「文档」一节）
 make test
 ```
 
-覆盖 32 个用例：`url_filter` / `body_validator` / `decision` / `factory` 纯逻辑，外加 `handler` 的 mock-ngx 集成测试。无需安装 OpenResty。
+覆盖 `url_filter` / `body_validator` / `decision` / `factory` / `rules_lint` 纯逻辑、`handler` 的 mock-ngx 集成测试，以及加载真实 `conf/waf_rules.lua` 的配置回归（当前 71 个用例全绿）。无需安装 OpenResty。
 
 > 测试用一个内置的极简 busted 风格框架（`spec/helper.lua`），写法与 busted 完全兼容。装了真 busted 后可直接 `busted spec/`，测试无需改动。
 
@@ -66,12 +66,13 @@ make stop      # 停止
 
 ## 规则配置（给运维团队）
 
-部署后运维日常只改一个文件 `conf/waf_rules.lua`（白名单 / 黑名单 / schemas），怎么改、改完怎么自检见 [WAF 规则配置指南](docs/WAF规则配置指南.md)。改完三件套：`make lint`（配置体检，抓 `openresty -t` 抓不到的引用一致性/必填错）→ `openresty … -t`（语法+加载）→ `systemctl reload openresty-waf`（热加载）。`waf_rules.lua` 由 `init_by_lua` 启动加载，**配置写错会让进程起不来（fail-closed）**，所以先校验再 reload 是硬要求。
+部署后运维日常只改一个文件 `conf/waf_rules.lua`（白名单 / 黑名单 / forbidden_headers / schemas），怎么改、改完怎么自检见 [WAF 规则配置指南](docs/WAF规则配置指南.md)。改完三件套：`make lint`（配置体检，抓 `openresty -t` 抓不到的引用一致性/必填错）→ `openresty … -t`（语法+加载）→ `systemctl reload openresty-waf`（热加载）。`waf_rules.lua` 由 `init_by_lua` 启动加载，**配置写错会让进程起不来（fail-closed）**，所以先校验再 reload 是硬要求。
 
 ## 当前能力
 
 - URL 白名单：精确 path + method；正则规则（生产走 `ngx.re` PCRE）；**未命中默认拒绝**。
 - URL 黑名单：先于白名单匹配，命中即拒（含 OpenClaw 控制面端点）。
+- 禁用请求头：拦 `x-openclaw-*` 等后端覆盖头（先于黑/白名单，防客户端旁路 `model` 白名单）；请求头被截断或 body 落盘时 **fail-closed** 拒绝。
 - body 校验（OpenAI Chat Completions）：顶层字段白名单（`additionalProperties:false`）、`model` 白名单、`messages` 非空/条数上限、`role` 白名单、**system 必须首位（防伪 system 越权注入）**、单条与总长上限、`Content-Type: application/json` 强制、非法 JSON 拒绝。
 - 拒绝响应只回原因码 + `request_id`，不回显规则与原始内容。
 

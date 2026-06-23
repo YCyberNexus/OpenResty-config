@@ -37,13 +37,14 @@ bash scripts/smoke.sh                                            # ④ 真实请
 
 ## 1. 配置文件长什么样
 
-`conf/waf_rules.lua` 返回一个 Lua 表，只有三个部分：
+`conf/waf_rules.lua` 返回一个 Lua 表，四个部分（`forbidden_headers` 可选）：
 
 ```lua
 return {
-  whitelist = { ... },   -- 白名单：哪些接口允许进（未命中一律拒）
-  blacklist = { ... },   -- 黑名单：先于白名单，命中即拒
-  schemas   = { ... },   -- body 校验器：限制请求体的结构与内容
+  whitelist         = { ... },  -- 白名单：哪些接口允许进（未命中一律拒）
+  blacklist         = { ... },  -- 黑名单：先于白名单，命中即拒
+  forbidden_headers = { ... },  -- 禁用请求头：命中即拒（可选；防 model 白名单旁路）
+  schemas           = { ... },  -- body 校验器：限制请求体的结构与内容
 }
 ```
 
@@ -58,13 +59,16 @@ return {
   │                               读取 body；若非空且 JSON 解析失败 ───────> 400
   │
   ▼
-① 黑名单匹配? ──命中──> 403 (reason=blacklist)
+① 带 forbidden_headers 里的头? ──命中──> 403 (reason=forbidden_header)
   │未命中
   ▼
-② 白名单匹配? ──未命中──> 403 (reason=not_in_whitelist)   ← 默认拒绝
+② 黑名单匹配? ──命中──> 403 (reason=blacklist)
+  │未命中
+  ▼
+③ 白名单匹配? ──未命中──> 403 (reason=not_in_whitelist)   ← 默认拒绝
   │命中某条规则
   ▼
-③ 该规则有 body=? ──无──> 放行 200
+④ 该规则有 body=? ──无──> 放行 200
   │有
   ▼
 body schema 校验 ──不过──> 400/422 ──过──> 放行 200
@@ -115,6 +119,22 @@ blacklist = {
 
 ---
 
+## 3.5　forbidden_headers —— 禁用请求头（防 model 白名单旁路）
+
+数组，每个元素是一个**全小写**的请求头名；**末尾 `*` 表示前缀匹配**（拦整族）。请求带了命中项就 403（`reason=forbidden_header`），且**先于黑/白名单判**。整段可省略（不配 = 不拦任何头）。
+
+```lua
+forbidden_headers = { "x-openclaw-*" },   -- 拦整个 x-openclaw-* 覆盖头家族
+```
+
+要点：
+- **用途**：拦住能**旁路 `schemas` 里 model 白名单**的“后端覆盖头”。OpenClaw 的 `x-openclaw-model` 允许客户端用请求头指定后端 model，绕过 `schemas.chat.models`；该网关是 operator-access 面，故默认按整族 `x-openclaw-*` 拦（连未文档化/后续新增的同族头一并挡）。
+- **前缀写法**：`"x-openclaw-*"` 匹配所有以 `x-openclaw-` 开头的头；精确写法 `"x-openclaw-model"` 只匹配该一个。`*` 只能放末尾。
+- **大小写 / 下划线自动归一**：运行时把配置名转小写、把进入头名的 `_` 当 `-`，所以 `X-OpenClaw-Model`、`x_openclaw_model` 都能命中（配置仍建议写全小写，体检会 warn 提示风格）。
+- **fail-closed**：请求头条数超 `get_headers` 上限被截断时无法完整核验 → 直接 400 `too_many_headers` 拒绝，不基于残缺头表放行。配套 `conf/nginx.conf` 的 `underscores_in_headers off`，不要开启。
+
+---
+
 ## 4. schemas —— body 校验器（限制请求体）
 
 一个 map：`名字 → 校验规则`。白名单规则用 `body = "名字"` 来引用它。
@@ -122,13 +142,15 @@ blacklist = {
 ```lua
 schemas = {
   chat = {
-    models             = { "gpt-4o", "gpt-4o-mini", "claude-opus-4-8" },
+    -- OpenClaw 的 model id 形如 openclaw / openclaw/default / openclaw/<agentId>
+    models             = { "openclaw", "openclaw/default" },
     max_messages       = 50,
     max_content_length = 8000,
     max_total_length   = 32000,
     allowed_roles      = { "system", "user", "assistant" },
-    allowed_fields     = { "model", "messages", "stream", "temperature",
-                           "top_p", "max_tokens", "n", "stop" },
+    allowed_fields     = { "model", "messages", "stream", "user", "temperature",
+                           "top_p", "frequency_penalty", "presence_penalty", "seed",
+                           "max_tokens", "max_completion_tokens", "stop" },
   },
 },
 ```
@@ -159,7 +181,7 @@ schemas = {
 
 ```lua
 my_schema = {
-  models             = { "gpt-4o" },                          -- 必填，非空；按需加 model
+  models             = { "openclaw", "openclaw/default" },    -- 必填，非空；OpenClaw 形如 openclaw/<agentId>
   allowed_roles      = { "system", "user", "assistant" },     -- 必填，非空；通常要含 "user"
   allowed_fields     = { "model", "messages" },               -- 必填；必须含 model 和 messages
   max_messages       = 50,                                    -- 必填，正整数（不要加引号）
@@ -177,9 +199,12 @@ my_schema = {
 | 码 | reason | 触发 |
 |---|---|---|
 | 200 | — | 放行 |
+| 403 | `forbidden_header` | 请求带了 `forbidden_headers` 里的头（如 `x-openclaw-model`），**先于**黑/白名单判 |
+| 400 | `too_many_headers` | 请求头条数超 `get_headers` 上限被截断，无法核验禁用头（fail-closed） |
 | 403 | `blacklist` | 命中黑名单 |
 | 403 | `not_in_whitelist` | 未命中白名单（默认拒绝） |
 | 415 | `unsupported_media_type` | POST/PUT/PATCH 但 `Content-Type` **不包含** `application/json` 子串（子串匹配、区分大小写） |
+| 413 | `body_too_large` | body 超 `client_body_buffer_size` 落盘、内存读不到，无法校验（fail-closed） |
 | 400 | `invalid_json` | 请求体不是合法 JSON |
 | 400 | `body`（code=schema） | body **结构**错：非对象 / 未知字段 / 缺 model 或 messages / messages 非数组或空 / message 非对象 / content 非字符串 |
 | 422 | `body`（code=policy） | body **策略**错：model 不允许 / 条数超限 / 长度超限 / **role 非法** / **system 不在首位** |
@@ -197,8 +222,8 @@ my_schema = {
 - **数字直接写、不要加引号**：`max_messages = 50` ✅；`max_messages = "50"` ❌（变成字符串，运行期 500，而且 `-t` 检查不出来）。
 - **表项之间都要逗号**，**字符串列表也一样**：
   ```lua
-  models = { "gpt-4o", "gpt-4o-mini" }   -- ✅ 元素间有逗号
-  models = { "gpt-4o" "gpt-4o-mini" }    -- ❌ 漏逗号，加载报错
+  models = { "openclaw", "openclaw/default" }   -- ✅ 元素间有逗号
+  models = { "openclaw" "openclaw/default" }    -- ❌ 漏逗号，加载报错
   ```
 - **Lua 表一律用花括号 `{ }`，不是方括号 `[ ]`**（有 JSON/数组背景的人极易写错）。
 - **注释用 `--`**（行注释），块注释用 `--[[ ... ]]`。
@@ -231,7 +256,7 @@ my_schema = {
 ```lua
 -- schemas 里加（抄模板改值）：
 chat_v2 = {
-  models = { "gpt-4o", "claude-opus-4-8" },
+  models = { "openclaw", "openclaw/default" },
   allowed_roles = { "system", "user", "assistant" },
   allowed_fields = { "model", "messages", "stream" },
   max_messages = 50, max_content_length = 8000, max_total_length = 32000,
@@ -240,9 +265,9 @@ chat_v2 = {
 { methods = { "POST" }, path = "/v2/chat/completions", body = "chat_v2" },
 ```
 
-**④ 新增一个允许的 model** —— 在对应 schema 的 `models` 里加（注意逗号）：
+**④ 新增一个允许的 model** —— 在对应 schema 的 `models` 里加（注意逗号；OpenClaw 形如 `openclaw/<agentId>`）：
 ```lua
-models = { "gpt-4o", "gpt-4o-mini", "claude-opus-4-8", "claude-sonnet-4-6" },
+models = { "openclaw", "openclaw/default", "openclaw/agent-foo" },
 ```
 
 **⑤ 调整长度 / 条数上限** —— 改 schema 里的 `max_*` 数字（保持是正整数、不加引号）。
@@ -334,6 +359,6 @@ bash scripts/smoke.sh                                            # ⑤ 实测
 
 ## 10. 职责与变更评审
 
-- **运维方**维护 `waf_rules.lua`（配规则）；**应用方**提供接口契约（哪些 path/method、请求体字段与数值上限）。当前 schema 里的数值（`max_*`、`models`）是占位，要按应用方给的接口契约据实收紧——对应方案的搁置项（接口契约与数值上限）。
+- **运维方**维护 `waf_rules.lua`（配规则）；**应用方**提供接口契约（哪些 path/method、请求体字段与数值上限）。schema 已按 OpenClaw 官方文档对齐（端点、字段、`model` 形如 `openclaw/<agentId>`）；其中 `max_*`、具体 `models`（agentId）、以及是否放开 `/v1/embeddings`·`/v1/responses`·`tools` 仍是占位/TODO，需按应用方接口契约与本网关安全基线据实收紧——对应方案的搁置项（接口契约与数值上限）。
 - 建议每次规则变更：**git 留痕**（谁、改了什么、为什么）+ 走评审/审批后再 reload。谁有权批准「放行一个新接口 / 新 model」，对应方案待澄清的「路由收口审批责任」，上线前应与相关方拍板。
 - 规则是「**先黑后白 + 默认拒绝**」：新接口不主动加白名单就是默认拒。这是有意的安全姿态——**宁可漏放，不可错放**。

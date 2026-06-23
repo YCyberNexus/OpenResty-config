@@ -27,6 +27,12 @@ return {
     { pattern = "^/v1/admin" },
   },
 
+  -- 禁用请求头：命中即 403（reason=forbidden_header），先于黑/白名单。头名全小写；末尾 * 为前缀匹配。
+  -- OpenClaw 文档化的“后端 model 覆盖头”是 x-openclaw-model；该网关是 operator-access 面，
+  -- 故按整族 x-openclaw-* 拦截（连未文档化/后续新增的同族覆盖头一并挡掉），防客户端旁路下方 model 白名单。
+  -- 匹配对下划线形态（x_openclaw_model）等价处理；头条数超 get_headers 上限会被 fail-closed 拒（too_many_headers）。
+  forbidden_headers = { "x-openclaw-*" },
+
   -- body 校验器（OpenAI Chat Completions 形态）。
   schemas = {
     chat = {
