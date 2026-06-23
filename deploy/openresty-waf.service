@@ -1,0 +1,25 @@
+[Unit]
+Description=OpenResty 七层 WAF 网关 (P2/P3, 项目位于 /opt/openresty-waf)
+After=network-online.target remote-fs.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+# PIDFile 必须与 nginx.conf 里 `pid logs/nginx.pid;` 在 -p 前缀下解析出的真实路径一致
+PIDFile=/opt/openresty-waf/logs/nginx.pid
+
+# 启动前先做一次配置语法校验,语法/Lua 加载出错则不启动(避免坏配置上线)
+ExecStartPre=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t -q -g 'daemon on; master_process on;'
+ExecStart=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx.conf -g 'daemon on; master_process on;'
+
+# systemctl reload openresty-waf -> 给 master 发 HUP 热加载
+ExecReload=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx.conf -s reload
+# systemctl stop openresty-waf   -> 优雅退出(处理完在途请求)
+ExecStop=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx.conf -s quit
+
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

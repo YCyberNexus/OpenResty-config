@@ -2,5 +2,13 @@ logs/
 *.pid
 .idea/
 
+# 离线部署打出来的包与上游 mTLS 证书,不入库
+*.tgz
+openresty-waf.tgz
+certs/
+
 # 原始会议纪要（内部资料），不入库
 流量安全网关方案.docx
+
+# Office 打开文档时的临时锁文件
+~$*

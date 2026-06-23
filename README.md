@@ -14,6 +14,7 @@ lua/waf/
   factory.lua         配置表 → 决策器 装配
   regex.lua           生产正则实现（ngx.re，"jo"）
   handler.lua         access_by_lua 入口（读 body、解析 JSON、调 decision、回写响应/日志）
+  rules_lint.lua      配置体检（静态检查 waf_rules，抓 openresty -t 抓不到的引用/必填错）
 conf/
   nginx.conf          OpenResty 配置（init_by_lua 构建决策器 + access_by_lua 挂 WAF）
   waf_rules.lua       规则定义（白名单/黑名单/schemas）
@@ -46,6 +47,14 @@ make stop      # 停止
 ```
 
 `make serve` 用一个桩上游（放行后回 `{"ok":true,"upstream":"stub"}`）。生产把 `conf/nginx.conf` 里的 `content_by_lua_block` 换成 `proxy_pass` 到对端 OpenClaw，并叠加 mTLS（方案 P4-1）。
+
+## 离线部署到服务器（CentOS）
+
+无外网服务器的完整部署/使用步骤见 [离线部署教程](docs/离线部署教程.md)：`scripts/package.sh`（Mac 端打包）→ 传包 → 解到 `/opt/openresty-waf` → `scripts/server-setup.sh`（建 logs/设权限/语法校验）→ `deploy/openresty-waf.service`（systemd）→ `scripts/smoke.sh` 验证。覆盖 SELinux/firewalld、权限、改规则热加载、接上游 OpenClaw、排障速查。
+
+## 规则配置（给运维团队）
+
+部署后运维日常只改一个文件 `conf/waf_rules.lua`（白名单 / 黑名单 / schemas），怎么改、改完怎么自检见 [WAF 规则配置指南](docs/WAF规则配置指南.md)。改完三件套：`make lint`（配置体检，抓 `openresty -t` 抓不到的引用一致性/必填错）→ `openresty … -t`（语法+加载）→ `systemctl reload openresty-waf`（热加载）。`waf_rules.lua` 由 `init_by_lua` 启动加载，**配置写错会让进程起不来（fail-closed）**，所以先校验再 reload 是硬要求。
 
 ## 当前能力
 

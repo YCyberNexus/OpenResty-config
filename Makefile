@@ -1,10 +1,14 @@
-.PHONY: test serve stop smoke
+.PHONY: test lint serve stop smoke
 
 OPENRESTY ?= openresty
 
 # 运行纯逻辑 + handler 集成测试（只需 luajit，无需 OpenResty）
 test:
 	@luajit spec/run.lua
+
+# 配置体检：静态检查 conf/waf_rules.lua（补 openresty -t 抓不到的盲区）
+lint:
+	@luajit scripts/check_rules.lua
 
 # 启动 WAF（需要本机已安装 OpenResty）
 serve:
