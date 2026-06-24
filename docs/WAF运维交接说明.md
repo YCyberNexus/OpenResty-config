@@ -22,7 +22,7 @@
 | 自检 | `scripts/smoke.sh` 9 条用例全绿 |
 | 能力范围 | 方案 **P2（URL 黑白名单）+ P3（请求体 JSON 校验）**；尚未含 P4 客户端身份认证、P5 配置热更新中心等 |
 
-> **⚠️ 重要：当前 `location /` 是测试桩。** 放行的流量只回 `{"ok":true,"upstream":"stub"}`，**尚未真正转发到 OpenClaw**。把桩换成真转发（+ 对上游 mTLS）是本次交接需要你们完成的核心剩余工作，见 **§3**。
+> **⚠️ 重要：当前 `location /` 是测试桩。** 放行的流量只回 `{"ok":true,"upstream":"stub"}`，**尚未真正转发到 OpenClaw**。把桩换成真转发到 OpenClaw 是本次交接需要你们完成的核心剩余工作，见 **§3**。
 
 WAF 在 `access_by_lua` 阶段的判定顺序（fail-closed）：
 ```
@@ -74,53 +74,37 @@ tail -f ${P}logs/error.log                # 运行日志，含每条 waf action=
 
 ### 3A. 需收齐的材料
 
-> 这些是「物料 / 凭据」，不是能远程配进 WAF 的东西——证书要由持 CA 方签发后交付，地址/放通要在网络设备上做。常分散在不同团队，按下表归口收集。
+> 这些是「物料 / 凭据」，不是能远程配进 WAF 的东西——地址/放通要在网络设备上做。按下表归口收集。
+>
+> **本方案不做 mTLS、不校验上游证书（`proxy_ssl_verify off`），因此无需任何证书（`ca/server/client`），OpenClaw 侧也无需信任配置。** 若日后安全基线要求验证上游身份，再按 §4 补 CA。
 
 **A. 上游地址与网络连通（必需）**
 - [ ] OpenClaw 对外服务的 `IP:端口`（或域名:端口）——要的是它**对外的 OpenAI 兼容接口地址**，不是本地控制面 `127.0.0.1:18789`。〔网络/基础设施〕
-- [ ] 协议与 TLS 版本确认：上游为 **HTTPS + mTLS**，支持 TLSv1.2/1.3。〔OpenClaw 运维方〕
+- [ ] 协议确认：上游为 **HTTPS**（本网关用 `proxy_pass https://`，但 `proxy_ssl_verify off` 不校验其证书）。〔OpenClaw 运维方〕
 - [ ] 网络放通：在网络层放行 **本网关 IP → OpenClaw IP:端口** 的出方向（不放通会 502 / 超时）。〔网络/基础设施〕
 - [ ] 是否多实例：单点还是多副本？多副本给全部 `IP:端口`（是否要负载/健康检查一并说）。〔OpenClaw 运维方〕
 - [ ]（若用域名）本网关能否解析该域名——离线环境无公网 DNS，可能需写 `/etc/hosts` 或配内网 DNS。〔网络/基础设施〕
 
-**B. mTLS 证书三件套（必需，重点）**
-- [ ] `ca.crt`：签发 **OpenClaw 服务端证书** 的 CA（用于网关验证上游身份），**要完整 CA 链**（根 + 中间）。〔PKI/安全〕
-- [ ] `client.crt`：本网关作为**客户端**的证书（OpenClaw 用它认网关身份）；若由中间 CA 签发，最好带上证书链。〔PKI/安全〕
-- [ ] `client.key`：`client.crt` 对应私钥。〔PKI/安全〕
-- [ ] **格式必须 PEM**（`-----BEGIN CERTIFICATE-----` 文本）。若发来的是 `.pfx`/`.p12`/`.jks`，需先转 PEM。
-- [ ] **私钥是否带密码（passphrase）**：nginx 启动不会交互输密码，**加密私钥会让 systemd 卡住起不来**。优先给**未加密** `client.key`；若必须加密，需同时提供密码（配 `ssl_password_file`）。
-- [ ] **上游服务端证书的 CN / SAN**（如 `openclaw.internal`）——用于 `proxy_ssl_name` / SNI 及开启 `proxy_ssl_verify on` 时的主机名校验。〔PKI/安全〕
-- [ ] 证书有效期 + 续期 owner / 流程（过期会让到上游整条链路全挂）。〔PKI/安全〕
+**B. 接入鉴权（是否要带 Token，必需确认）**
+- [ ] 网关访问 OpenClaw 是否还要带 `Authorization: Bearer xxx` / API Key？要的话给值、头名，以及该 key 的管理/轮换归属（网关侧用 `proxy_set_header` 注入）。〔OpenClaw 运维方 / 应用方〕
 
-**C. OpenClaw 侧的信任配置（必需，最易漏）**
-- [ ] 在 **OpenClaw 服务端把本网关 client 证书 / 其签发 CA 加入信任**。mTLS 是双向的，光网关信任上游不够，上游也得信任网关，否则握手被上游拒。〔OpenClaw 运维方〕
-
-**D. 接入鉴权（除 mTLS 外是否还要带 Token，必需确认）**
-- [ ] 网关访问 OpenClaw 除 mTLS 外是否还要带 `Authorization: Bearer xxx` / API Key？要的话给值、头名，以及该 key 的管理/轮换归属（网关侧用 `proxy_set_header` 注入）。〔OpenClaw 运维方 / 应用方〕
-
-**E. 接口契约（用于把规则从占位值收紧，建议一起要）**
+**C. 接口契约（用于把规则从占位值收紧，建议一起要）**
 - [ ] 真实对外开放的**路径白名单**（现占位仅 `POST /v1/chat/completions`、`GET /v1/models`）。〔应用方〕
 - [ ] 允许的 **model 列表**（OpenClaw 形如 `openclaw/<agentId>`；当前规则占位 `openclaw` / `openclaw/default`，需实例实际 agent 列表）。〔应用方/运维〕
 - [ ] 请求体真实上限：`messages` 条数、单条/累计长度、是否允许 `stream`、还允许哪些字段。〔应用方〕
 
-**F. 联调协调（建议）**
+**D. 联调协调（建议）**
 - [ ] 约联调窗口：切 `proxy_pass` 要 `reload`，且需 OpenClaw 侧配合做端到端连通测试。
 - [ ]（后续 P6）审计日志外发 SIEM 的接收地址/协议（syslog / HTTP）——现不阻塞。
 
 ### 3B. 材料齐后在 WAF 上做的配置变更
 
-1) 证书落位（权限与项目一致）：
-```bash
-sudo mkdir -p /opt/openresty-waf/certs
-sudo cp ca.crt client.crt client.key /opt/openresty-waf/certs/
-sudo chown root:nobody /opt/openresty-waf/certs/*
-sudo chmod 640 /opt/openresty-waf/certs/*
-```
+> 仓库 `conf/nginx.conf` 已是 `proxy_pass` + `proxy_ssl_verify off` 的无 mTLS 版（随包 `openresty-waf.tgz` 部署即生效），下面主要是**填地址 + 收紧规则 + 放行外联**。
 
-2) 改 `conf/nginx.conf` 的 `location /`：删掉 `content_by_lua` 桩，换成 `proxy_pass` + 上游 mTLS。**完整模板见 `离线部署教程.md` §12**，要点：
+1) 改 `conf/nginx.conf` 的 `upstream`：把占位地址换成材料 A 的真实 `IP:端口`。**完整模板见 `离线部署教程.md` §12**，要点：
 ```nginx
 upstream openclaw_backend {
-    server <OpenClaw_IP>:<端口>;     # 来自材料 A
+    server <OpenClaw_IP>:<端口>;     # 来自材料 A（不是控制面 127.0.0.1:18789）
     keepalive 16;
 }
 server {
@@ -133,36 +117,31 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header Connection "";
-        # proxy_set_header Authorization "Bearer <token>";        # 若材料 D 需要
+        # proxy_set_header Authorization "Bearer <token>";        # 若材料 B 需要
 
         proxy_ssl_protocols TLSv1.2 TLSv1.3;
-        proxy_ssl_verify on;
-        proxy_ssl_trusted_certificate /opt/openresty-waf/certs/ca.crt;
-        proxy_ssl_certificate         /opt/openresty-waf/certs/client.crt;
-        proxy_ssl_certificate_key     /opt/openresty-waf/certs/client.key;
-        proxy_ssl_name <上游证书 CN/SAN>;                          # 来自材料 B
+        proxy_ssl_verify off;     # 不做 mTLS，也不校验上游证书（内网简化）
     }
 }
 ```
 
-3) 按真实契约收紧 `conf/waf_rules.lua`（路径白名单 / model 列表 / 上限，来自材料 E）。
+2) 按真实契约收紧 `conf/waf_rules.lua`（路径白名单 / model 列表 / 上限，来自材料 C）。
 
-4) 校验并热加载：
+3) 放行 SELinux 外联（否则 `proxy_pass` 出方向被禁、502），校验并热加载：
 ```bash
+sudo setsebool -P httpd_can_network_connect 1
 /usr/local/openresty/luajit/bin/luajit /opt/openresty-waf/scripts/check_rules.lua
 sudo /usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx.conf -t
 sudo systemctl reload openresty-waf
 ```
 
-5) 端到端验证：约 OpenClaw 侧联调，发一条真实 `POST /v1/chat/completions`，确认**透传到 OpenClaw 并拿到真实响应**（不再是 stub 的 `{"ok":true,"upstream":"stub"}`）。
+4) 端到端验证：约 OpenClaw 侧联调，发一条真实 `POST /v1/chat/completions`，确认**透传到 OpenClaw 并拿到真实响应**（不再是 stub 的 `{"ok":true,"upstream":"stub"}`）。
 
 ---
 
 ## 4. 注意事项 / 风险
 
-- **私钥加密** → systemd 启动会卡（不交互输密码）。用未加密 `client.key`，或配 `ssl_password_file`。
-- **mTLS 双向信任**：OpenClaw 侧必须信任本网关 client 证书，否则握手被上游拒（材料 C）。
-- **证书续期**：过期 = 到上游整条链路全挂。须明确续期 owner 与流程，提前预警。
+- **不校验上游证书**：当前 `proxy_ssl_verify off`，本网关不验证 OpenClaw 身份，理论上有中间人风险，内网可控环境通常可接受。**若日后要验证上游身份**：向 OpenClaw 要其服务端证书的 CA（`ca.crt`），改 `proxy_ssl_verify on` + `proxy_ssl_trusted_certificate <ca>` + `proxy_ssl_name <上游证书 CN/SAN>`，仍无需客户端证书（带 client 证书那才是 mTLS）。
 - **SELinux 现为 Disabled**：若安全基线要求开回 Enforcing，先 `restorecon -Rv /opt/openresty-waf`，再 `semanage port -a -t http_port_t -p tcp 8080`；接 `proxy_pass` 后还需 `setsebool -P httpd_can_network_connect 1`，否则出方向被禁、502。详见 `离线部署教程.md` §7 / §12。
 - **firewalld 现 not running**：8080 对外暴露由上层网络/安全组控制，按基线确认是否需收口。
 - **改规则风险**：坏规则 fail-closed 会让进程起不来——改完务必先 `check_rules` + `-t` 再 `reload`。
