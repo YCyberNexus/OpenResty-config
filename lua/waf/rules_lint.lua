@@ -1,206 +1,445 @@
--- 配置体检：静态检查 waf_rules 配置表里那些 `openresty -t` 抓不到、
--- 却会在运行期变成 500 / 全拒 / 安全绕过的错误。纯逻辑，不依赖 ngx，可单测。
--- lint(config) -> issues[{ level, where, msg }]；level 为 "error" | "warn"。
+-- 运维规则静态体检：补足 openresty -t 无法发现的 schema 引用、URL 冲突和 fail-open 风险。
+local JsonValidator = require("waf.json_validator")
+
 local M = {}
-
-local KNOWN_METHODS = {
-  GET = true, POST = true, PUT = true, PATCH = true,
-  DELETE = true, HEAD = true, OPTIONS = true,
+local KNOWN_CONFIG_KEYS = {
+  version = true,
+  direction = true,
+  example = true,
+  max_request_body_bytes = true,
+  max_response_body_bytes = true,
+  whitelist = true,
+  blacklist = true,
+  forbidden_headers = true,
+  schemas = true,
 }
-local BODY_METHODS = { POST = true, PUT = true, PATCH = true }
+local KNOWN_WHITELIST_KEYS = {
+  id = true,
+  methods = true,
+  path = true,
+  request_schema = true,
+  response_schemas = true,
+  -- 保留这些旧/不安全关键字只为给出有针对性的迁移错误，而不是静默忽略。
+  pattern = true,
+  allow_query = true,
+  body = true,
+}
+local KNOWN_BLACKLIST_KEYS = {
+  methods = true,
+  path = true,
+  pattern = true,
+}
+local KNOWN_METHODS = {
+  GET = true, POST = true, PUT = true, PATCH = true, DELETE = true,
+}
+local KNOWN_TYPES = {
+  object = true, array = true, string = true, integer = true,
+  number = true, boolean = true, ["null"] = true,
+}
+local KNOWN_SCHEMA_KEYS = {
+  type = true,
+  required = true,
+  properties = true,
+  additional_properties = true,
+  max_properties = true,
+  items = true,
+  min_items = true,
+  max_items = true,
+  min_length = true,
+  max_length = true,
+  max_bytes = true,
+  non_blank = true,
+  trimmed = true,
+  prefix = true,
+  format = true,
+  minimum = true,
+  maximum = true,
+  enum = true,
+  contract = true,
+}
 
-local function nonempty_array(t)
-  return type(t) == "table" and #t > 0
+local function is_array(value)
+  if type(value) ~= "table" then return false end
+  local count, highest = 0, 0
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key ~= math.floor(key) then return false end
+    count = count + 1
+    if key > highest then highest = key end
+  end
+  return count == highest
 end
 
-local function has_value(list, val)
-  if type(list) ~= "table" then return false end
-  for _, v in ipairs(list) do
-    if v == val then return true end
+local function nonempty_array(value)
+  return is_array(value) and next(value) ~= nil
+end
+
+local function positive_integer(value)
+  return type(value) == "number" and value > 0 and value == math.floor(value)
+end
+
+local function type_has(schema, wanted)
+  if schema.type == wanted then return true end
+  if type(schema.type) == "table" then
+    for _, value in ipairs(schema.type) do
+      if value == wanted then return true end
+    end
   end
   return false
 end
 
--- 校验一条规则的 methods 字段（white / black 通用）
+local function check_known_keys(value, known, at, add)
+  for key in pairs(value or {}) do
+    if type(key) ~= "string" or not known[key] then
+      add("error", at .. "." .. tostring(key), "未知配置关键字；可能是拼写错误")
+    end
+  end
+end
+
 local function check_methods(rule, at, add)
-  if rule.methods == nil then return end  -- 省略 = 不限方法，合法
-  if type(rule.methods) ~= "table" then
-    add("error", at, "methods 必须是数组，如 { \"POST\" }（省略表示不限方法）；写成标量会让该规则永不命中——黑名单上更会形成绕过")
+  if not nonempty_array(rule.methods) then
+    add("error", at .. ".methods", "methods 必须是非空数组；跨区白名单不得省略为任意方法")
     return
   end
-  for _, m in ipairs(rule.methods) do
-    if type(m) ~= "string" then
-      add("error", at, "methods 元素必须是字符串，如 \"POST\"")
-    elseif m ~= m:upper() or not KNOWN_METHODS[m:upper()] then
-      add("error", at, "method \"" .. tostring(m)
-        .. "\" 非法：必须大写且为标准 HTTP 方法，如 \"POST\"（代码大小写敏感，小写永不命中）")
+  local seen = {}
+  for _, method in ipairs(rule.methods) do
+    if type(method) ~= "string" or method ~= method:upper() or not KNOWN_METHODS[method] then
+      add("error", at .. ".methods", "method 必须是当前代理支持的大写 HTTP 方法")
+    elseif seen[method] then
+      add("warn", at .. ".methods", "存在重复 method：" .. method)
+    else
+      seen[method] = true
     end
   end
 end
 
--- 两条规则的方法适用范围是否重叠（任一为 nil=任意 即重叠）
-local function methods_overlap(a, b)
-  if a.methods == nil or b.methods == nil then return true end
-  if type(a.methods) ~= "table" or type(b.methods) ~= "table" then return false end
-  local set = {}
-  for _, m in ipairs(a.methods) do
-    if type(m) == "string" then set[m:upper()] = true end
+local function schema_types(schema, at, add)
+  local declared = schema.type
+  if type(declared) == "string" then
+    if not KNOWN_TYPES[declared] then add("error", at .. ".type", "未知 JSON 类型：" .. declared) end
+    return
   end
-  for _, m in ipairs(b.methods) do
-    if type(m) == "string" and set[m:upper()] then return true end
+  if not nonempty_array(declared) then
+    add("error", at .. ".type", "type 必须是类型名或非空类型数组")
+    return
   end
-  return false
+  local seen = {}
+  for _, item in ipairs(declared) do
+    if type(item) ~= "string" or not KNOWN_TYPES[item] then
+      add("error", at .. ".type", "类型数组包含未知 JSON 类型")
+    elseif seen[item] then
+      add("warn", at .. ".type", "类型数组包含重复项：" .. item)
+    else
+      seen[item] = true
+    end
+  end
 end
 
-local function methods_has_body(rule)
-  if type(rule.methods) ~= "table" then return false end
-  for _, m in ipairs(rule.methods) do
-    if type(m) == "string" and BODY_METHODS[m:upper()] then return true end
+local function check_schema(schema, at, add)
+  if type(schema) ~= "table" then
+    add("error", at, "schema 必须是 table")
+    return
   end
-  return false
+  for key in pairs(schema) do
+    if type(key) ~= "string" or not KNOWN_SCHEMA_KEYS[key] then
+      add("error", at .. "." .. tostring(key), "未知 schema 关键字；可能是拼写错误")
+    end
+  end
+  schema_types(schema, at, add)
+
+  if type_has(schema, "object") then
+    if type(schema.properties) ~= "table" then
+      add("error", at .. ".properties", "object 必须显式配置 properties")
+    end
+    if schema.additional_properties ~= false then
+      add("error", at .. ".additional_properties", "object 必须 additional_properties=false，未知字段不得放行")
+    end
+    if schema.max_properties ~= nil and (type(schema.max_properties) ~= "number"
+      or schema.max_properties < 0 or schema.max_properties ~= math.floor(schema.max_properties)) then
+      add("error", at .. ".max_properties", "max_properties 必须是非负整数")
+    end
+    local properties = type(schema.properties) == "table" and schema.properties or {}
+    if schema.required ~= nil and not is_array(schema.required) then
+      add("error", at .. ".required", "required 必须是数组")
+    else
+      for _, key in ipairs(schema.required or {}) do
+        if type(key) ~= "string" or properties[key] == nil then
+          add("error", at .. ".required", "required 引用了未定义字段：" .. tostring(key))
+        end
+      end
+    end
+    for key, child in pairs(properties) do
+      if type(key) ~= "string" or key == "" then
+        add("error", at .. ".properties", "属性名必须是非空字符串")
+      else
+        check_schema(child, at .. ".properties." .. key, add)
+      end
+    end
+  end
+
+
+  local applicability = {
+    required = type_has(schema, "object"),
+    properties = type_has(schema, "object"),
+    additional_properties = type_has(schema, "object"),
+    max_properties = type_has(schema, "object"),
+    items = type_has(schema, "array"),
+    min_items = type_has(schema, "array"),
+    max_items = type_has(schema, "array"),
+    min_length = type_has(schema, "string"),
+    max_length = type_has(schema, "string"),
+    max_bytes = type_has(schema, "string"),
+    non_blank = type_has(schema, "string"),
+    trimmed = type_has(schema, "string"),
+    prefix = type_has(schema, "string"),
+    format = type_has(schema, "string"),
+    minimum = type_has(schema, "number") or type_has(schema, "integer"),
+    maximum = type_has(schema, "number") or type_has(schema, "integer"),
+  }
+  for key, applies in pairs(applicability) do
+    if schema[key] ~= nil and not applies then
+      add("error", at .. "." .. key, key .. " 与声明的 JSON 类型不匹配，运行时不会应用")
+    end
+  end
+
+  if type_has(schema, "array") then
+    if type(schema.items) ~= "table" then
+      add("error", at .. ".items", "array 必须配置 items schema")
+    else
+      check_schema(schema.items, at .. ".items", add)
+    end
+    if schema.min_items ~= nil and (type(schema.min_items) ~= "number"
+      or schema.min_items < 0 or schema.min_items ~= math.floor(schema.min_items)) then
+      add("error", at .. ".min_items", "min_items 必须是非负整数")
+    end
+    if schema.max_items ~= nil and (type(schema.max_items) ~= "number"
+      or schema.max_items < 0 or schema.max_items ~= math.floor(schema.max_items)) then
+      add("error", at .. ".max_items", "max_items 必须是非负整数")
+    end
+    if type(schema.min_items) == "number" and type(schema.max_items) == "number"
+      and schema.min_items > schema.max_items then
+      add("error", at, "min_items 不能大于 max_items")
+    end
+  end
+
+  if type_has(schema, "string") then
+    for _, key in ipairs({ "min_length", "max_length", "max_bytes" }) do
+      local value = schema[key]
+      if value ~= nil and (type(value) ~= "number" or value < 0 or value ~= math.floor(value)) then
+        add("error", at .. "." .. key, key .. " 必须是非负整数")
+      end
+    end
+    if type(schema.min_length) == "number" and type(schema.max_length) == "number"
+      and schema.min_length > schema.max_length then
+      add("error", at, "min_length 不能大于 max_length")
+    end
+    if schema.prefix ~= nil and (type(schema.prefix) ~= "string" or schema.prefix == "") then
+      add("error", at .. ".prefix", "prefix 必须是非空字符串")
+    end
+    for _, key in ipairs({ "non_blank", "trimmed" }) do
+      if schema[key] ~= nil and type(schema[key]) ~= "boolean" then
+        add("error", at .. "." .. key, key .. " 必须是 boolean")
+      end
+    end
+    if schema.format and not JsonValidator.formats[schema.format] then
+      add("error", at .. ".format", "未知字符串 format：" .. tostring(schema.format))
+    end
+  end
+
+  if type_has(schema, "number") or type_has(schema, "integer") then
+    if schema.minimum ~= nil and type(schema.minimum) ~= "number" then
+      add("error", at .. ".minimum", "minimum 必须是数字")
+    end
+    if schema.maximum ~= nil and type(schema.maximum) ~= "number" then
+      add("error", at .. ".maximum", "maximum 必须是数字")
+    end
+    if type(schema.minimum) == "number" and type(schema.maximum) == "number"
+      and schema.minimum > schema.maximum then
+      add("error", at, "minimum 不能大于 maximum")
+    end
+  end
+
+  if schema.enum ~= nil and not nonempty_array(schema.enum) then
+    add("error", at .. ".enum", "enum 必须是非空数组")
+  end
+  if schema.contract ~= nil then
+    add("error", at .. ".contract", "contract 业务钩子已移除；请使用运维可审计的声明式 schema")
+  end
 end
 
-function M.lint(config)
+function M.lint(config, opts)
+  opts = opts or {}
   local issues = {}
-  local function add(level, where, msg)
-    issues[#issues + 1] = { level = level, where = where, msg = msg }
+  local function add(level, where, message)
+    issues[#issues + 1] = { level = level, where = where, msg = message }
   end
 
-  config = config or {}
-  local schemas = config.schemas or {}
-  local whitelist = config.whitelist or {}
-  local blacklist = config.blacklist or {}
-
-  if #whitelist == 0 then
-    add("warn", "whitelist", "白名单为空，所有请求都会被默认拒绝（403 not_in_whitelist）")
+  if type(config) ~= "table" then
+    add("error", "config", "规则文件必须返回 table")
+    return issues
   end
+  check_known_keys(config, KNOWN_CONFIG_KEYS, "config", add)
 
-  -- 黑名单 path 集合，供白名单做遮蔽冲突检查
-  local bl_paths = {}
-  for i, rule in ipairs(blacklist) do
-    local at = "blacklist[" .. i .. "]"
-    if rule.path == nil and rule.pattern == nil then
-      add("error", at, "规则既无 path 也无 pattern，永远不会命中（等于没拉黑）")
+  local function table_field(name)
+    if type(config[name]) ~= "table" then
+      add("error", name, name .. " 必须是 table")
+      return {}
     end
-    if rule.path ~= nil then bl_paths[rule.path] = true end
-    if rule.body ~= nil then
-      add("warn", at, "黑名单只看 URL、不做 body 校验，body 字段会被忽略")
-    end
-    check_methods(rule, at, add)
+    return config[name]
   end
 
+  local whitelist = table_field("whitelist")
+  local blacklist = table_field("blacklist")
+  local schemas = table_field("schemas")
+  if type(config.whitelist) == "table" and not is_array(config.whitelist) then
+    add("error", "whitelist", "whitelist 必须是连续数组")
+  end
+  if type(config.blacklist) == "table" and not is_array(config.blacklist) then
+    add("error", "blacklist", "blacklist 必须是连续数组")
+  end
+
+  if type(config.direction) ~= "string" or config.direction == "" then
+    add("error", "direction", "必须配置非空方向标识；具体方向由运维白名单台账决定")
+  end
+  if type(config.version) ~= "string" or config.version == "" then
+    add("error", "version", "必须配置非空规则版本")
+  end
+  if config.example ~= nil and type(config.example) ~= "boolean" then
+    add("error", "example", "example 只能是 boolean")
+  end
+  if opts.production then
+    local version = tostring(config.version or "")
+    if config.example == true or version:match("^EXAMPLE") then
+      add("error", "example", "示例规则不能作为生产活动规则；请完成审批、更新版本并设置 example=false")
+    end
+    if version:match("^UNCONFIGURED") or config.direction == "not_configured" then
+      add("error", "version", "生产部署前必须由运维填写正式规则版本和方向")
+    end
+    if config.example == nil then
+      add("error", "example", "生产活动规则必须显式设置 example=false")
+    end
+  end
+  for _, key in ipairs({ "max_request_body_bytes", "max_response_body_bytes" }) do
+    if not positive_integer(config[key]) then
+      add("error", key, key .. " 必须是大于 0 的整数")
+    end
+  end
+  if positive_integer(config.max_request_body_bytes)
+    and positive_integer(config.max_response_body_bytes)
+    and config.max_response_body_bytes < config.max_request_body_bytes then
+    add("warn", "max_response_body_bytes", "响应上限小于请求上限，请确认不是误配")
+  end
+
+  if not nonempty_array(whitelist) then
+    add("warn", "whitelist", "白名单为空，所有请求都会被默认拒绝")
+  end
+
+  local ids, seen_routes, referenced = {}, {}, {}
   for i, rule in ipairs(whitelist) do
     local at = "whitelist[" .. i .. "]"
-    if rule.path == nil and rule.pattern == nil then
-      add("error", at, "规则既无 path 也无 pattern，永远不会命中（等于没配）")
+    if type(rule) ~= "table" then
+      add("error", at, "白名单规则必须是 table")
+      rule = {}
     end
-    if rule.path ~= nil and rule.pattern ~= nil then
-      add("warn", at, "同时写了 path 和 pattern；代码里 path 优先，pattern 会被忽略")
+    check_known_keys(rule, KNOWN_WHITELIST_KEYS, at, add)
+    if type(rule.id) ~= "string" or rule.id == "" then
+      add("error", at .. ".id", "每条白名单必须有稳定非空 id")
+    elseif ids[rule.id] then
+      add("error", at .. ".id", "白名单 id 重复：" .. rule.id)
+    else
+      ids[rule.id] = true
+    end
+    if type(rule.path) ~= "string" or rule.path:sub(1, 1) ~= "/"
+      or rule.path:find("?", 1, true) or rule.path:find("#", 1, true) then
+      add("error", at .. ".path", "白名单必须使用不含 query/fragment 的绝对精确 path")
+    end
+    if rule.pattern ~= nil then
+      add("error", at .. ".pattern", "跨区生产白名单不得使用正则 path；必须逐条精确登记")
     end
     check_methods(rule, at, add)
-    -- body 引用的 schema 必须存在（-t 抓不到，会运行期 500 misconfigured）
-    if rule.body ~= nil and schemas[rule.body] == nil then
-      add("error", at, "body 引用了不存在的 schema：\"" .. tostring(rule.body)
-        .. "\"；该接口所有请求会 500（misconfigured）")
+    if rule.allow_query ~= nil then
+      add("error", at .. ".allow_query", "当前版本不支持 query 参数 schema，不能开启任意 query 放行")
     end
-    -- body 配给不带请求体的方法（GET 等）→ 该接口请求被当空 body 一律 400
-    if rule.body ~= nil and type(rule.methods) == "table" and not methods_has_body(rule) then
-      add("error", at, "给不带请求体的方法（如 GET）配了 body 校验；这些请求 body 为 nil、会被判非对象一律 400")
+    if rule.body ~= nil then
+      add("error", at .. ".body", "旧 body 配置已废弃，请使用 request_schema")
     end
-    -- 白名单 path 被黑名单遮蔽 → 先黑后白，会被先行 403 全拒
-    if rule.path ~= nil and bl_paths[rule.path] then
-      add("error", at, "白名单 path \"" .. rule.path
-        .. "\" 同时出现在黑名单；黑名单先判，该接口会被先行 403 全拒")
-    end
-  end
 
-  -- 同 path 且方法重叠的多条白名单规则：靠前者会短路靠后者（含 body 校验被绕过）
-  for i = 1, #whitelist do
-    for j = i + 1, #whitelist do
-      local a, b = whitelist[i], whitelist[j]
-      if a.path ~= nil and a.path == b.path and methods_overlap(a, b) then
-        if (a.body or "<none>") ~= (b.body or "<none>") then
-          add("error", "whitelist[" .. i .. "]&[" .. j .. "]",
-            "同一 path \"" .. a.path .. "\" 的多条规则方法重叠且 body 配置不一致；"
-            .. "match 取第一条命中，靠前规则会短路 body 校验，可能绕过")
-        else
-          add("warn", "whitelist[" .. i .. "]&[" .. j .. "]",
-            "同一 path \"" .. a.path .. "\" 配了多条方法重叠的重复规则")
-        end
-      end
-    end
-  end
-
-  -- 被引用情况，供 schema 未引用提示
-  local referenced = {}
-  for _, rule in ipairs(whitelist) do
-    if rule.body then referenced[rule.body] = true end
-  end
-
-  for name, s in pairs(schemas) do
-    local at = "schemas." .. tostring(name)
-    if type(s) ~= "table" then
-      add("error", at, "schema 必须是一个表")
-    else
-      if not nonempty_array(s.models) then
-        add("error", at .. ".models", "models 为空或缺失，该 schema 会拒绝所有 model（422）")
-      end
-
-      if not nonempty_array(s.allowed_roles) then
-        add("error", at .. ".allowed_roles", "allowed_roles 为空或缺失，所有 message 的 role 都会被拒（422）")
-      elseif not has_value(s.allowed_roles, "user") then
-        add("warn", at .. ".allowed_roles",
-          "allowed_roles 不含 \"user\"；几乎所有 Chat 请求都带 user 角色，缺它会把正常对话全部拒（422）")
-      end
-
-      -- allowed_fields 整体先查根因，避免只暴露派生的「缺 model/messages」
-      if not nonempty_array(s.allowed_fields) then
-        add("error", at .. ".allowed_fields",
-          "allowed_fields 缺失或不是非空数组；该 schema 会把所有请求字段当未知字段拒（全部 400）")
+    local methods = type(rule.methods) == "table" and rule.methods or {}
+    for _, method in ipairs(methods) do
+      local route_key = tostring(method) .. " " .. tostring(rule.path)
+      if seen_routes[route_key] then
+        add("error", at, "method+path 重复，靠前规则会短路：" .. route_key)
       else
-        if not has_value(s.allowed_fields, "model") then
-          add("error", at .. ".allowed_fields", "缺 \"model\"；带 model 的正常请求会被当未知字段拒（400）")
-        end
-        if not has_value(s.allowed_fields, "messages") then
-          add("error", at .. ".allowed_fields", "缺 \"messages\"；带 messages 的正常请求会被当未知字段拒（400）")
-        end
+        seen_routes[route_key] = true
       end
-
-      for _, key in ipairs({ "max_messages", "max_content_length", "max_total_length" }) do
-        local v = s[key]
-        if type(v) ~= "number" then
-          add("error", at .. "." .. key, key .. " 未配成数字；运行期长度比较会报错导致 500")
-        elseif v <= 0 or v ~= math.floor(v) then
-          add("error", at .. "." .. key, key
-            .. " 必须是大于 0 的整数；配成 <=0 会让该 schema 拒绝所有正常请求")
-        end
+    end
+    if rule.request_schema ~= nil then
+      if type(rule.request_schema) ~= "string" or rule.request_schema == "" then
+        add("error", at .. ".request_schema", "request_schema 必须是非空 schema 名称")
+      elseif schemas[rule.request_schema] == nil then
+        add("error", at .. ".request_schema", "引用了不存在的 schema：" .. tostring(rule.request_schema))
+      else
+        referenced[rule.request_schema] = true
       end
+    end
 
-      if not referenced[name] then
-        add("warn", at, "该 schema 没有被任何 whitelist 规则的 body 引用（可能是写错名字或多余定义）")
+    if type(rule.response_schemas) ~= "table" or next(rule.response_schemas) == nil then
+      add("error", at .. ".response_schemas", "每条 URL 必须显式登记允许的响应状态与 schema")
+    else
+      for status, schema_name in pairs(rule.response_schemas) do
+        local numeric = tonumber(status)
+        if type(status) ~= "string" or not numeric or numeric < 100 or numeric > 599
+          or numeric ~= math.floor(numeric) or #status ~= 3 then
+          add("error", at .. ".response_schemas", "响应状态键必须是三位字符串，如 \"200\"")
+        end
+        if type(schema_name) ~= "string" or schemas[schema_name] == nil then
+          add("error", at .. ".response_schemas", "引用了不存在的响应 schema：" .. tostring(schema_name))
+        else
+          referenced[schema_name] = true
+        end
       end
     end
   end
 
-  -- forbidden_headers：禁用请求头名单（可选）。ngx.req.get_headers() 的 key 全小写，
-  -- 大写名永不命中 = 静默绕过，故对大小写从严（与 method 大小写检查同理）。
+  for i, rule in ipairs(blacklist) do
+    local at = "blacklist[" .. i .. "]"
+    if type(rule) == "table" then check_known_keys(rule, KNOWN_BLACKLIST_KEYS, at, add) end
+    if type(rule) ~= "table" or (rule.path == nil and rule.pattern == nil) then
+      add("error", at, "黑名单规则必须有 path 或 pattern")
+    elseif rule.path ~= nil and rule.pattern ~= nil then
+      add("error", at, "黑名单 path 与 pattern 只能配置一个")
+    elseif rule.path ~= nil and (type(rule.path) ~= "string" or rule.path:sub(1, 1) ~= "/") then
+      add("error", at .. ".path", "黑名单 path 必须是绝对路径")
+    elseif rule.pattern ~= nil and (type(rule.pattern) ~= "string" or rule.pattern == "") then
+      add("error", at .. ".pattern", "黑名单 pattern 必须是非空字符串")
+    elseif rule.methods ~= nil then
+      check_methods(rule, at, add)
+    end
+  end
+
+  for name, schema in pairs(schemas) do
+    if type(name) ~= "string" or name == "" then
+      add("error", "schemas", "schema 名称必须是非空字符串")
+    end
+    check_schema(schema, "schemas." .. tostring(name), add)
+    if not referenced[name] then
+      add("warn", "schemas." .. tostring(name), "schema 未被任何请求或响应规则引用")
+    end
+  end
+
   local forbidden_headers = config.forbidden_headers
-  if forbidden_headers ~= nil then
-    if type(forbidden_headers) ~= "table" then
-      add("error", "forbidden_headers", "forbidden_headers 必须是数组，如 { \"x-openclaw-model\" }")
-    else
-      for i, h in ipairs(forbidden_headers) do
-        local at = "forbidden_headers[" .. i .. "]"
-        if type(h) ~= "string" then
-          add("error", at, "元素必须是字符串（请求头名）")
-        elseif h == "" or h == "*" then
-          add("error", at, "请求头名不能为空或裸 \"*\"；裸 \"*\" 会匹配所有请求头、拦死全部请求")
-        elseif h ~= h:lower() then
-          add("warn", at, "请求头名含大写 \"" .. tostring(h)
-            .. "\"；运行时虽会自动转小写仍能命中，但建议直接写全小写以保持一致、避免误读")
-        elseif h:find("*", 1, true) and h:sub(-1) ~= "*" then
-          add("warn", at, "通配符 \"*\" 只支持放在末尾做前缀匹配（如 x-openclaw-*）；放在中间会被当字面量、永不命中")
-        end
+  if type(forbidden_headers) ~= "table" then
+    add("error", "forbidden_headers", "forbidden_headers 必须是数组")
+  elseif not is_array(forbidden_headers) then
+    add("error", "forbidden_headers", "forbidden_headers 必须是连续数组")
+  else
+    for i, header in ipairs(forbidden_headers) do
+      local at = "forbidden_headers[" .. i .. "]"
+      if type(header) ~= "string" or header == "" or header == "*" then
+        add("error", at, "请求头名必须是非空字符串，且不能是裸 *")
+      elseif header ~= header:lower() then
+        add("warn", at, "请求头名建议全部小写")
+      elseif header:find("*", 1, true) and header:sub(-1) ~= "*" then
+        add("error", at, "通配符只允许位于末尾做前缀匹配")
       end
     end
   end
@@ -208,13 +447,12 @@ function M.lint(config)
   return issues
 end
 
--- 统计某个级别的条数（"error" / "warn"）
 function M.count(issues, level)
-  local n = 0
-  for _, i in ipairs(issues or {}) do
-    if i.level == level then n = n + 1 end
+  local count = 0
+  for _, issue in ipairs(issues or {}) do
+    if issue.level == level then count = count + 1 end
   end
-  return n
+  return count
 end
 
 return M

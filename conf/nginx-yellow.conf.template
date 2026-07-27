@@ -1,0 +1,102 @@
+# 黄区 WAF 生产模板。所有 __PLACEHOLDER__ 必须由审批后的白名单台账值替换；
+# 不要直接把模板作为运行配置。具体 URL 只从运维维护的 conf/waf_rules.lua 加载。
+# 仅接受蓝区 WAF 的 mTLS 身份，再转发已审批的黄区目标服务。
+user nobody;
+worker_processes auto;
+error_log /data/openresty-waf/yellow/log/error.log info;
+pid /run/openresty-waf/yellow.pid;
+
+events { worker_connections 2048; }
+
+http {
+  include conf/waf-http-common.conf;
+
+  map $ssl_client_s_dn $waf_peer_allowed {
+    default 0;
+    "__BLUE_WAF_CLIENT_SUBJECT_DN__" 1;
+  }
+  map $http_x_waf_trace_id $waf_peer_trace_id {
+    "" $request_id;
+    default $http_x_waf_trace_id;
+  }
+
+  init_by_lua_block {
+    local rules = require("waf_rules")
+    require("waf.handler").init(rules, {
+      allowed_hosts = { "__YELLOW_WAF_HOST__" },
+      production = true,
+    })
+  }
+
+  upstream protected_backend {
+    # TODO(上线门禁)：替换为当前规则台账审批的黄区目标服务地址与端口。
+    server __PROTECTED_SERVICE_IP__:__PROTECTED_SERVICE_PORT__;
+    keepalive 32;
+  }
+
+  # 未命中黄区 WAF SNI 的 TLS 握手直接拒绝。
+  server {
+    listen __YELLOW_WAF_LISTEN_IP__:__YELLOW_WAF_PORT__ ssl default_server;
+    ssl_reject_handshake on;
+    set $waf_node_role "yellow";
+    set $waf_approval_id "__WAF_RULE_APPROVAL_ID__";
+    set $waf_trace_id $request_id;
+    set $waf_upstream_target "__PROTECTED_SERVICE_IP__:__PROTECTED_SERVICE_PORT__";
+    include conf/waf-audit-vars.conf;
+    # TLS 握手失败记录在 error.log；已形成 HTTP 请求但 Host 不匹配时仍写本地拒绝审计。
+    access_log /data/openresty-waf/yellow/audit/rejected.log waf_reject;
+  }
+
+  include conf/waf-audit-log-format.conf;
+
+  server {
+    listen __YELLOW_WAF_LISTEN_IP__:__YELLOW_WAF_PORT__ ssl;
+    server_name __YELLOW_WAF_HOST__;
+    default_type application/json;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_certificate /opt/openresty-waf/certs/yellow-waf-server.crt;
+    ssl_certificate_key /opt/openresty-waf/certs/yellow-waf-server.key;
+    ssl_client_certificate /opt/openresty-waf/certs/blue-waf-client-ca.crt;
+    ssl_verify_client on;
+    ssl_verify_depth 3;
+
+    set $waf_node_role "yellow";
+    set $waf_approval_id "__WAF_RULE_APPROVAL_ID__";
+    set $waf_trace_id $waf_peer_trace_id;
+    set $waf_upstream_target "__PROTECTED_SERVICE_IP__:__PROTECTED_SERVICE_PORT__";
+    include conf/waf-audit-vars.conf;
+    if ($waf_peer_allowed = 0) {
+      set $waf_action "deny_request";
+      set $waf_reason "peer_identity_not_allowed";
+      set $waf_field "ssl_client_s_dn";
+      return 403;
+    }
+    access_log /data/openresty-waf/yellow/audit/access.log waf_audit;
+    add_header X-Request-ID $waf_trace_id always;
+
+    include conf/waf-public-location.conf;
+
+    location ^~ /_waf_upstream/ {
+      internal;
+      # TODO(上线门禁)：将 __PROTECTED_SERVICE_SCHEME__ 明确替换为台账批准的 http 或
+      # https；若为 https，必须再配置
+      # proxy_ssl_verify on、受信 CA 与证书名称，不得使用 proxy_ssl_verify off。
+      proxy_pass __PROTECTED_SERVICE_SCHEME__://protected_backend/;
+      proxy_http_version 1.1;
+      proxy_pass_request_headers off;
+      proxy_request_buffering on;
+      proxy_buffering off;
+      proxy_ignore_headers X-Accel-Redirect X-Accel-Expires X-Accel-Limit-Rate X-Accel-Buffering Expires Cache-Control Set-Cookie Vary;
+      proxy_set_header Host __PROTECTED_SERVICE_HOST__;
+      proxy_set_header Content-Type $waf_upstream_content_type;
+      proxy_set_header Content-Length $waf_forward_body_bytes;
+      proxy_set_header Accept application/json;
+      proxy_set_header Connection "";
+      proxy_set_header X-WAF-Trace-ID $waf_trace_id;
+      proxy_connect_timeout 5s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 60s;
+    }
+  }
+}

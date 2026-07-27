@@ -8,16 +8,16 @@ describe("url_filter", function()
 
   it("matches an exact path when the method is allowed", function()
     local f = UrlFilter.new({
-      { methods = { "POST" }, path = "/v1/chat/completions" },
+      { methods = { "POST" }, path = "/ai/knowledge/search" },
     })
-    assert.is_not_nil(f:match("POST", "/v1/chat/completions"))
+    assert.is_not_nil(f:match("POST", "/ai/knowledge/search"))
   end)
 
   it("does not match when the method is not allowed", function()
     local f = UrlFilter.new({
-      { methods = { "POST" }, path = "/v1/chat/completions" },
+      { methods = { "POST" }, path = "/ai/knowledge/search" },
     })
-    assert.is_nil(f:match("GET", "/v1/chat/completions"))
+    assert.is_nil(f:match("GET", "/ai/knowledge/search"))
   end)
 
   it("matches a regex rule via the injected regex engine", function()
@@ -29,15 +29,15 @@ describe("url_filter", function()
     local f = UrlFilter.new({
       { methods = { "POST" }, pattern = "^/v1/.*$" },
     }, regex_match)
-    assert.is_not_nil(f:match("POST", "/v1/chat/completions"))
+    assert.is_not_nil(f:match("POST", "/ai/knowledge/search"))
     assert.are.equal("^/v1/.*$", seen.pattern)
-    assert.are.equal("/v1/chat/completions", seen.str)
+    assert.are.equal("/ai/knowledge/search", seen.str)
   end)
 
   it("does not match a regex rule when the engine returns false", function()
     local f = UrlFilter.new({
       { methods = { "POST" }, pattern = "^/admin/.*$" },
     }, function() return false end)
-    assert.is_nil(f:match("POST", "/v1/chat/completions"))
+    assert.is_nil(f:match("POST", "/ai/knowledge/search"))
   end)
 end)

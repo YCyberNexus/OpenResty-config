@@ -1,0 +1,30 @@
+[Unit]
+Description=OpenResty WAF node (%i)
+Documentation=file:///opt/openresty-waf/docs/双WAF白名单链路部署说明.md
+After=network-online.target remote-fs.target nss-lookup.target
+Wants=network-online.target
+ConditionPathExists=/opt/openresty-waf/conf/nginx-%i.conf
+
+[Service]
+Type=forking
+PIDFile=/run/openresty-waf/%i.pid
+RuntimeDirectory=openresty-waf
+RuntimeDirectoryMode=0750
+UMask=0027
+
+ExecStartPre=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -t -q -g 'daemon on; master_process on;'
+ExecStart=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -g 'daemon on; master_process on;'
+ExecReload=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -s reload
+ExecStop=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -s quit
+
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/data/openresty-waf/%i /run/openresty-waf
+
+[Install]
+WantedBy=multi-user.target

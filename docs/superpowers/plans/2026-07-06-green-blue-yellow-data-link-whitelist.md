@@ -1,5 +1,7 @@
 # Green Blue Yellow Data Link Whitelist Implementation Plan
 
+> Historical snapshot: this plan records the repository state and intended work as of 2026-07-06. It is not the active WAF configuration. Since 2026-07-27, business URLs are supplied only through the operations-managed rules file; the repository default is an empty deny-all whitelist. See `README.md` and `docs/双WAF白名单链路部署说明.md` for the current behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a repository-level data-link whitelist ledger for green, blue, and yellow security zones, with explicit controls for cross-boundary knowledge flow.

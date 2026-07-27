@@ -1,0 +1,53 @@
+describe("production nginx templates", function()
+  local function read(path)
+    local file = assert(io.open(path, "rb"))
+    local value = file:read("*a")
+    file:close()
+    return value
+  end
+
+  local function includes(value, fragment)
+    return value:find(fragment, 1, true) ~= nil
+  end
+
+  it("forces the blue WAF to use verified mTLS only toward the yellow WAF", function()
+    local config = read("conf/nginx-blue.conf.template")
+    assert.is_true(includes(config, "proxy_pass https://yellow_waf/;"))
+    assert.is_true(includes(config, "proxy_ssl_verify on;"))
+    assert.is_true(includes(config, "proxy_ssl_trusted_certificate /opt/openresty-waf/certs/yellow-waf-ca.crt;"))
+    assert.is_true(includes(config, "proxy_ssl_certificate /opt/openresty-waf/certs/blue-waf-client.crt;"))
+    assert.is_true(includes(config, "proxy_ssl_certificate_key /opt/openresty-waf/certs/blue-waf-client.key;"))
+    assert.is_nil(config:find("proxy_ssl_verify off", 1, true))
+  end)
+
+  it("requires a verified and explicitly registered blue WAF identity at yellow", function()
+    local config = read("conf/nginx-yellow.conf.template")
+    assert.is_true(includes(config, "ssl_reject_handshake on;"))
+    assert.is_true(includes(config, "ssl_verify_client on;"))
+    assert.is_true(includes(config, '"__BLUE_WAF_CLIENT_SUBJECT_DN__" 1;'))
+    assert.is_true(includes(config, "peer_identity_not_allowed"))
+    assert.is_true(includes(config, "__PROTECTED_SERVICE_IP__"))
+    assert.is_nil(config:find("KNOWLEDGE_SERVICE", 1, true))
+  end)
+
+  it("rebuilds upstream headers and writes unbuffered local audit records", function()
+    local blue = read("conf/nginx-blue.conf.template")
+    local yellow = read("conf/nginx-yellow.conf.template")
+    local log_format = read("conf/waf-audit-log-format.conf")
+    local service = read("deploy/openresty-waf@.service")
+    for _, config in ipairs({ blue, yellow }) do
+      assert.is_true(includes(config, 'local rules = require("waf_rules")'))
+      assert.is_true(includes(config, "production = true"))
+      assert.is_true(includes(config, "proxy_pass_request_headers off;"))
+      assert.is_true(includes(config, "proxy_set_header Content-Type $waf_upstream_content_type;"))
+      assert.is_true(includes(config, "proxy_set_header Content-Length $waf_forward_body_bytes;"))
+      assert.is_true(includes(config, "/data/openresty-waf/"))
+      assert.is_nil(config:find("access_log .- buffer=", 1))
+    end
+    assert.is_true(includes(yellow, "/data/openresty-waf/yellow/audit/rejected.log waf_reject;"))
+    assert.is_nil(log_format:find("$args", 1, true))
+    assert.is_nil(log_format:find("$request_uri", 1, true))
+    assert.is_true(includes(log_format, '"forward_body_sha256":"$waf_forward_body_sha256"'))
+    assert.is_true(includes(service, "ReadWritePaths=/data/openresty-waf/%i /run/openresty-waf"))
+  end)
+end)

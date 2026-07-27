@@ -1,4 +1,4 @@
-.PHONY: test lint serve stop smoke
+.PHONY: test lint lint-production serve stop smoke
 
 OPENRESTY ?= openresty
 
@@ -6,9 +6,13 @@ OPENRESTY ?= openresty
 test:
 	@luajit spec/run.lua
 
-# 配置体检：静态检查 conf/waf_rules.lua（补 openresty -t 抓不到的盲区）
+# 配置体检：静态检查运维维护的 conf/waf_rules.lua（默认空白名单、全拒绝）
 lint:
 	@luajit scripts/check_rules.lua
+
+# 上线门禁：拒绝 UNCONFIGURED、示例规则和其它生产不完整配置
+lint-production:
+	@luajit scripts/check_rules.lua --production conf/waf_rules.lua
 
 # 启动 WAF（需要本机已安装 OpenResty）
 serve:
@@ -19,6 +23,6 @@ serve:
 stop:
 	@$(OPENRESTY) -p "$(CURDIR)/" -c conf/nginx.conf -s stop
 
-# 对运行中的 WAF 发冒烟请求，验证放行/拦截
+# 对显式加载的知识库示例规则发冒烟请求；生产应使用运维规则对应的验收用例
 smoke:
 	@bash scripts/smoke.sh

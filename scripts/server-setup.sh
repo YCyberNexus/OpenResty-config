@@ -1,64 +1,95 @@
 #!/usr/bin/env bash
-# 在 CentOS 服务器上准备 WAF 运行环境:定位二进制、建 logs、设属主权限、做配置语法校验。
-# SELinux / firewalld 这类要按现场策略拍板的操作,本脚本只「打印命令」不自动执行。
-#
-# 前提:已把项目解包到 $PREFIX(默认 /opt/openresty-waf),且服务器已装好 OpenResty。
-# 用法:
-#   sudo bash /opt/openresty-waf/scripts/server-setup.sh
-#   # 可用环境变量覆盖默认值:
-#   sudo PREFIX=/opt/openresty-waf RUN_USER=nobody PORT=8080 bash .../server-setup.sh
+# 准备单个生产 WAF 节点。只创建目录/权限并校验已渲染配置，不替用户猜测地址、端口或证书身份。
+# 用法：sudo NODE_ROLE=blue bash /opt/openresty-waf/scripts/server-setup.sh
+#       sudo NODE_ROLE=yellow bash /opt/openresty-waf/scripts/server-setup.sh
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/openresty-waf}"
-RUN_USER="${RUN_USER:-nobody}"
-PORT="${PORT:-8080}"
+RUN_GROUP="${RUN_GROUP:-nobody}"
 OPENRESTY="${OPENRESTY:-/usr/local/openresty/bin/openresty}"
+LUAJIT="${LUAJIT:-/usr/local/openresty/luajit/bin/luajit}"
+NODE_ROLE="${NODE_ROLE:-}"
+DATA_ROOT="${DATA_ROOT:-/data/openresty-waf}"
 
-echo "== 1. 定位 openresty 二进制 =="
-if [ ! -x "$OPENRESTY" ]; then
+if [[ "$NODE_ROLE" != "blue" && "$NODE_ROLE" != "yellow" ]]; then
+  echo "NODE_ROLE 必须显式设为 blue 或 yellow。" >&2
+  exit 2
+fi
+
+if [[ ! -x "$OPENRESTY" ]]; then
   OPENRESTY="$(command -v openresty || true)"
 fi
-if [ -z "${OPENRESTY:-}" ] || [ ! -x "$OPENRESTY" ]; then
-  echo "找不到 openresty。请执行 'rpm -ql openresty | grep bin/openresty' 定位后用 OPENRESTY=... 重试。" >&2
+if [[ -z "${OPENRESTY:-}" || ! -x "$OPENRESTY" ]]; then
+  echo "找不到 openresty；请通过 OPENRESTY=/绝对路径 指定。" >&2
   exit 1
 fi
-echo "  使用: $OPENRESTY"
-"$OPENRESTY" -v 2>&1 || true
+if [[ ! -x "$LUAJIT" ]]; then
+  LUAJIT="$(command -v luajit || true)"
+fi
+if [[ -z "${LUAJIT:-}" || ! -x "$LUAJIT" ]]; then
+  echo "找不到 luajit；请通过 LUAJIT=/绝对路径 指定。" >&2
+  exit 1
+fi
 
-echo "== 2. 建 logs 目录并设属主/权限 =="
-mkdir -p "$PREFIX/logs"
-# 整体属主 root、属组运行用户;目录可进入、文件只读(防运行态被篡改)
-chown -R "root:$RUN_USER" "$PREFIX"
-find "$PREFIX" -type d -exec chmod 750 {} +
-find "$PREFIX" -type f -exec chmod 640 {} +
-# logs 必须让 worker(运行用户)可写,否则 error_log/access_log 写不进去
-chown -R "$RUN_USER:$RUN_USER" "$PREFIX/logs"
-chmod 770 "$PREFIX/logs"
-echo "  $PREFIX 属主权限已设置,logs 归 $RUN_USER 可写"
+CONFIG="$PREFIX/conf/nginx-$NODE_ROLE.conf"
+TEMPLATE="$PREFIX/conf/nginx-$NODE_ROLE.conf.template"
+if [[ ! -f "$CONFIG" ]]; then
+  echo "缺少已渲染配置：$CONFIG" >&2
+  echo "请从 $TEMPLATE 复制，按审批台账替换全部 __PLACEHOLDER__ 后重试。" >&2
+  exit 2
+fi
+if grep -Eq '__[A-Z0-9_]+__' "$CONFIG"; then
+  echo "$CONFIG 仍含未替换占位符，拒绝继续：" >&2
+  grep -En '__[A-Z0-9_]+__' "$CONFIG" >&2
+  exit 2
+fi
 
-echo "== 3. 配置语法校验 (openresty -t) =="
-"$OPENRESTY" -p "$PREFIX/" -c conf/nginx.conf -t
+echo "== 1. 准备持久化审计目录 =="
+install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/$NODE_ROLE/audit"
+install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/$NODE_ROLE/log"
+for log_file in "$DATA_ROOT/$NODE_ROLE/audit/access.log" "$DATA_ROOT/$NODE_ROLE/audit/rejected.log" \
+  "$DATA_ROOT/$NODE_ROLE/log/error.log"; do
+  if [[ ! -e "$log_file" ]]; then
+    install -o root -g "$RUN_GROUP" -m 0640 /dev/null "$log_file"
+  else
+    chown "root:$RUN_GROUP" "$log_file"
+    chmod 0640 "$log_file"
+  fi
+done
+echo "  审计：$DATA_ROOT/$NODE_ROLE/audit/access.log"
+echo "  运行日志：$DATA_ROOT/$NODE_ROLE/log/error.log"
+
+echo "== 2. 加固程序与证书权限 =="
+chown -R "root:$RUN_GROUP" "$PREFIX"
+find "$PREFIX" -type d -exec chmod 0750 {} +
+find "$PREFIX" -type f -exec chmod 0640 {} +
+if [[ -d "$PREFIX/certs" ]]; then
+  find "$PREFIX/certs" -type f -name '*.key' -exec chmod 0640 {} +
+fi
+
+echo "== 3. 规则与 nginx 配置校验 =="
+"$LUAJIT" "${PREFIX}/scripts/check_rules.lua" --production "${PREFIX}/conf/waf_rules.lua"
+echo "  活动规则 SHA-256：$(sha256sum "${PREFIX}/conf/waf_rules.lua" | awk '{print $1}')"
+"$OPENRESTY" -p "$PREFIX/" -c "conf/nginx-$NODE_ROLE.conf" -t
 
 cat <<EOF
 
-== 基础准备完成。以下按现场状态「选做」(均需 root) ==
+基础准备完成。启用前仍需按现场状态完成：
 
-# (a) SELinux 是否 Enforcing:
-getenforce
+1. SELinux Enforcing：
+   semanage fcontext -a -t httpd_sys_content_t "$PREFIX(/.*)?"
+   semanage fcontext -a -t httpd_log_t "$DATA_ROOT(/.*)?"
+   restorecon -Rv "$PREFIX" "$DATA_ROOT"
+   setsebool -P httpd_can_network_connect 1
+   并按审批端口配置 http_port_t（接口文档没有端口，本脚本不代填）。
 
-# 若为 Enforcing,放行 $PORT 端口绑定 + 修正 $PREFIX 文件上下文:
-semanage port -a -t http_port_t -p tcp $PORT 2>/dev/null || semanage port -m -t http_port_t -p tcp $PORT
-semanage fcontext -a -t httpd_sys_content_t "$PREFIX(/.*)?"
-restorecon -Rv "$PREFIX"
-#   (semanage 来自 policycoreutils-python-utils[C8]/policycoreutils-python[C7],缺则离线装该 RPM)
-#   (将来接 proxy_pass 到上游 OpenClaw 时,还需放行出方向: setsebool -P httpd_can_network_connect 1)
+2. 只放行已审批方向：蓝区业务 -> 蓝 WAF；蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。
+   蓝、黄两侧 conf/waf_rules.lua 必须来自同一审批版本并具有相同 SHA-256。
 
-# (b) firewalld 是否开启,需被其它主机访问时放行 $PORT:
-firewall-cmd --permanent --add-port=$PORT/tcp && firewall-cmd --reload
+3. 安装并启动实例服务：
+   cp "$PREFIX/deploy/openresty-waf@.service" /etc/systemd/system/
+   systemctl daemon-reload
+   systemctl enable --now "openresty-waf@$NODE_ROLE"
 
-# (c) 启动(命令行方式;生产建议改用 systemd,见 deploy/openresty-waf.service):
-$OPENRESTY -p "$PREFIX/" -c conf/nginx.conf
-
-# (d) 验证:
-bash $PREFIX/scripts/smoke.sh
+4. 用真实放行/拒绝用例核对 $DATA_ROOT/$NODE_ROLE/audit/access.log；配置日志轮转、留存期和防篡改转储。
 EOF

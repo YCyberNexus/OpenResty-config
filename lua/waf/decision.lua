@@ -1,23 +1,35 @@
--- 决策链：先黑后白 + 默认拒绝（fail-closed）。
--- 组合 url_filter（黑/白名单）与 body_validator，给出最终放行/拒绝判定。
+-- 决策链：来源 Host/请求头 → 黑名单 → URL 白名单 → 查询串 → 请求 schema。
+-- 响应侧按“接口规则 + HTTP 状态码”选择 schema，未登记状态或校验失败一律拦截。
 -- 纯逻辑，不依赖 ngx。
--- evaluate(req{method, path, body}) -> { action="allow"|"deny", status, reason, ... }
 local Decision = {}
 Decision.__index = Decision
 
+local function deny(status, reason, extra)
+  local result = { action = "deny", status = status, reason = reason }
+  if extra then
+    for key, value in pairs(extra) do result[key] = value end
+  end
+  return result
+end
+
+local function norm_header(key)
+  return tostring(key):lower():gsub("_", "-")
+end
+
+local function to_host_set(hosts)
+  local result = {}
+  for _, host in ipairs(hosts or {}) do result[tostring(host):lower()] = true end
+  return result
+end
+
 function Decision.new(opts)
   opts = opts or {}
-  -- 预处理禁用头规则：统一小写；末尾 * 视为前缀匹配（拦整族，如 x-openclaw-*）。
-  -- ngx.req.get_headers() 返回的 key 已是小写，配置里大写在此被规范化掉（故大写配置仍能命中）。
   local forbidden = {}
-  for _, h in ipairs(opts.forbidden_headers or {}) do
-    local name = tostring(h):lower()
+  for _, header in ipairs(opts.forbidden_headers or {}) do
+    local name = tostring(header):lower()
     if name:sub(-1) == "*" then
-      local p = name:sub(1, -2)
-      -- 跳过空前缀（裸 "*"）：它会匹配所有头、拦死全部请求；正常应被 rules_lint 拦在配置阶段
-      if p ~= "" then
-        forbidden[#forbidden + 1] = { prefix = p }
-      end
+      local prefix = name:sub(1, -2)
+      if prefix ~= "" then forbidden[#forbidden + 1] = { prefix = prefix } end
     elseif name ~= "" then
       forbidden[#forbidden + 1] = { exact = name }
     end
@@ -27,69 +39,92 @@ function Decision.new(opts)
     blacklist = opts.blacklist,
     validators = opts.validators or {},
     forbidden_headers = forbidden,
+    allowed_hosts = to_host_set(opts.allowed_hosts),
   }, Decision)
 end
 
-local function deny(status, reason, extra)
-  local r = { action = "deny", status = status, reason = reason }
-  if extra then
-    for k, v in pairs(extra) do r[k] = v end
+function Decision:match(req)
+  if next(self.allowed_hosts) == nil then
+    return deny(500, "misconfigured", { field = "allowed_hosts" })
   end
-  return r
-end
+  if not self.allowed_hosts[tostring(req.host or ""):lower()] then
+    return deny(403, "host_not_allowed")
+  end
 
--- 把进入的 header key 规范化：小写 + 下划线视作连字符
--- （防 underscores_in_headers on 时 x_openclaw_model 这类形态绕过禁用头）。
-local function norm_header(k)
-  return tostring(k):lower():gsub("_", "-")
-end
-
-function Decision:evaluate(req)
-  -- ① 禁用请求头：拦 x-openclaw-* 等能旁路 model 白名单的“后端覆盖头”，全局硬拒，先于一切
-  if #self.forbidden_headers > 0 then
-    -- 头被截断（条数超过 get_headers 上限）时无法完整核验，fail-closed 直接拒，不基于残缺表放行
-    if req.headers_truncated then
-      return deny(400, "too_many_headers")
-    end
-    local headers = req.headers
-    if headers then
-      for k in pairs(headers) do
-        local nk = norm_header(k)
-        for _, f in ipairs(self.forbidden_headers) do
-          if (f.exact and nk == f.exact)
-            or (f.prefix and nk:sub(1, #f.prefix) == f.prefix) then
-            return deny(403, "forbidden_header", { field = nk })
-          end
+  if req.headers_truncated then return deny(400, "too_many_headers") end
+  if req.headers then
+    for key, value in pairs(req.headers) do
+      local normalized = norm_header(key)
+      if type(value) == "table" then
+        return deny(400, "duplicate_header", { field = normalized })
+      end
+      for _, forbidden in ipairs(self.forbidden_headers) do
+        if (forbidden.exact and normalized == forbidden.exact)
+          or (forbidden.prefix and normalized:sub(1, #forbidden.prefix) == forbidden.prefix) then
+          return deny(403, "forbidden_header", { field = normalized })
         end
       end
     end
   end
 
-  -- ② 先过黑名单：命中即拒，避免白名单 URL 上夹带攻击 payload 被放行
   if self.blacklist and self.blacklist:match(req.method, req.path) then
     return deny(403, "blacklist")
   end
 
-  -- ③ 再过白名单：未命中一律拒绝（默认拒绝 / fail-closed）
-  local rule = self.whitelist:match(req.method, req.path)
-  if not rule then
-    return deny(403, "not_in_whitelist")
+  local rule = self.whitelist and self.whitelist:match(req.method, req.path)
+  if not rule then return deny(403, "not_in_whitelist") end
+
+  if req.query_present or (req.args ~= nil and req.args ~= "") then
+    return deny(403, "query_not_allowed", { rule = rule })
   end
 
-  -- ④ 命中规则若声明了 body schema，则做 body 校验
-  if rule.body then
-    local validator = self.validators[rule.body]
-    if not validator then
-      return deny(500, "misconfigured", { field = rule.body })
-    end
-    local ok, err = validator:validate(req.body)
-    if not ok then
-      local status = (err.code == "schema") and 400 or 422
-      return deny(status, "body", { field = err.field, message = err.message })
-    end
+  if req.body_present and not rule.request_schema then
+    return deny(400, "unexpected_body", { rule = rule })
   end
 
   return { action = "allow", status = 200, rule = rule }
+end
+
+function Decision:validate_request(rule, body)
+  if not rule.request_schema then return { action = "allow", status = 200, rule = rule } end
+  local validator = self.validators[rule.request_schema]
+  if not validator then
+    return deny(500, "misconfigured", { field = rule.request_schema, rule = rule })
+  end
+  local ok, err = validator:validate(body, { phase = "request", rule = rule })
+  if not ok then
+    local status = err.code == "schema" and 400 or 422
+    return deny(status, "request_body", { field = err.field, message = err.message, rule = rule })
+  end
+  return { action = "allow", status = 200, rule = rule }
+end
+
+function Decision:evaluate(req)
+  local matched = self:match(req)
+  if matched.action == "deny" then return matched end
+  return self:validate_request(matched.rule, req.body)
+end
+
+function Decision:validate_response(rule, status, body, request_body)
+  local response_schemas = rule and rule.response_schemas or nil
+  local schema_name = response_schemas and response_schemas[tostring(status)] or nil
+  if not schema_name then
+    return deny(502, "response_status_not_allowed", { field = tostring(status), rule = rule })
+  end
+  local validator = self.validators[schema_name]
+  if not validator then
+    return deny(502, "misconfigured", { field = schema_name, rule = rule })
+  end
+  local ok, err = validator:validate(body, {
+    phase = "response",
+    rule = rule,
+    status = status,
+    request_body = request_body,
+  })
+  if not ok then
+    return deny(502, "response_body", { field = err.field, message = err.message, rule = rule })
+  end
+  return { action = "allow", status = status, rule = rule }
 end
 
 return Decision

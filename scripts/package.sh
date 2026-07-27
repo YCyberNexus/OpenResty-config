@@ -16,19 +16,27 @@ OUT="${1:-$ROOT/openresty-waf.tgz}"
 # 运行期 + 部署需要随包带上的文件(logs/ 不带,在服务器上现建)
 FILES=(
   conf/nginx.conf
+  conf/nginx-blue.conf.template
+  conf/nginx-yellow.conf.template
+  conf/waf-http-common.conf
+  conf/waf-audit-log-format.conf
+  conf/waf-audit-vars.conf
+  conf/waf-public-location.conf
   conf/waf_rules.lua
+  conf/waf_rules_knowledge_example.lua
   lua/waf/url_filter.lua
-  lua/waf/body_validator.lua
+  lua/waf/json_validator.lua
   lua/waf/decision.lua
   lua/waf/factory.lua
   lua/waf/regex.lua
   lua/waf/handler.lua
   lua/waf/rules_lint.lua
-  schemas/chat_completions.schema.json
   scripts/smoke.sh
   scripts/server-setup.sh
   scripts/check_rules.lua
-  deploy/openresty-waf.service
+  deploy/openresty-waf@.service
+  docs/双WAF白名单链路部署说明.md
+  docs/知识库接口文档.md
 )
 
 TMP="$(mktemp -d)"
@@ -41,7 +49,8 @@ for f in "${FILES[@]}"; do
 done
 
 # 统一换行为 LF,去掉可能的 CRLF(避免在 CentOS 上脚本/配置被解析异常)
-find "$STAGE" -type f \( -name '*.sh' -o -name '*.lua' -o -name '*.conf' -o -name '*.service' -o -name '*.json' \) \
+find "$STAGE" -type f \( -name '*.sh' -o -name '*.lua' -o -name '*.conf' -o -name '*.template' \
+  -o -name '*.service' -o -name '*.json' -o -name '*.md' \) \
   -exec perl -pi -e 's/\r$//' {} +
 
 # COPYFILE_DISABLE=1 阻止 macOS 往 tar 里塞 ._AppleDouble / 扩展属性条目

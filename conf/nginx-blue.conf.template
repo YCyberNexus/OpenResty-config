@@ -1,0 +1,87 @@
+# 蓝区 WAF 生产模板。所有 __PLACEHOLDER__ 必须由审批后的白名单台账值替换；
+# 不要直接把模板作为运行配置。具体 URL 只从运维维护的 conf/waf_rules.lua 加载。
+# 蓝区服务 -> 本 WAF -> mTLS -> 黄区 WAF。
+user nobody;
+worker_processes auto;
+error_log /data/openresty-waf/blue/log/error.log info;
+pid /run/openresty-waf/blue.pid;
+
+events { worker_connections 2048; }
+
+http {
+  include conf/waf-http-common.conf;
+
+  init_by_lua_block {
+    local rules = require("waf_rules")
+    require("waf.handler").init(rules, {
+      allowed_hosts = { "__BLUE_WAF_HOST__" },
+      production = true,
+    })
+  }
+
+  upstream yellow_waf {
+    # TODO(上线门禁)：替换为台账审批的黄区 WAF 业务地址与端口。
+    server __YELLOW_WAF_IP__:__YELLOW_WAF_PORT__;
+    keepalive 32;
+  }
+
+  # 先注册 Lua 可写审计变量；未命中业务 Host 的 HTTP 请求仍持久化安全的拒绝记录。
+  server {
+    listen __BLUE_WAF_LISTEN_IP__:__BLUE_WAF_LISTEN_PORT__ default_server;
+    server_name "";
+    set $waf_node_role "blue";
+    set $waf_approval_id "__WAF_RULE_APPROVAL_ID__";
+    set $waf_trace_id $request_id;
+    set $waf_upstream_target "__YELLOW_WAF_HOST__:__YELLOW_WAF_PORT__";
+    include conf/waf-audit-vars.conf;
+    access_log /data/openresty-waf/blue/audit/rejected.log waf_reject;
+    return 444;
+  }
+
+  include conf/waf-audit-log-format.conf;
+
+  server {
+    # TODO(上线门禁)：若 WAF 与蓝区业务同机，优先绑定回环；否则填审批后的监听地址。
+    listen __BLUE_WAF_LISTEN_IP__:__BLUE_WAF_LISTEN_PORT__;
+    server_name __BLUE_WAF_HOST__;
+    default_type application/json;
+
+    set $waf_node_role "blue";
+    set $waf_approval_id "__WAF_RULE_APPROVAL_ID__";
+    set $waf_trace_id $request_id;
+    set $waf_upstream_target "__YELLOW_WAF_HOST__:__YELLOW_WAF_PORT__";
+    include conf/waf-audit-vars.conf;
+    access_log /data/openresty-waf/blue/audit/access.log waf_audit;
+    add_header X-Request-ID $waf_trace_id always;
+
+    include conf/waf-public-location.conf;
+
+    location ^~ /_waf_upstream/ {
+      internal;
+      proxy_pass https://yellow_waf/;
+      proxy_http_version 1.1;
+      proxy_pass_request_headers off;
+      proxy_request_buffering on;
+      proxy_buffering off;
+      proxy_ignore_headers X-Accel-Redirect X-Accel-Expires X-Accel-Limit-Rate X-Accel-Buffering Expires Cache-Control Set-Cookie Vary;
+      proxy_set_header Host __YELLOW_WAF_HOST__;
+      proxy_set_header Content-Type $waf_upstream_content_type;
+      proxy_set_header Content-Length $waf_forward_body_bytes;
+      proxy_set_header Accept application/json;
+      proxy_set_header Connection "";
+      proxy_set_header X-WAF-Trace-ID $waf_trace_id;
+
+      proxy_connect_timeout 5s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 60s;
+      proxy_ssl_protocols TLSv1.2 TLSv1.3;
+      proxy_ssl_server_name on;
+      proxy_ssl_name __YELLOW_WAF_TLS_NAME__;
+      proxy_ssl_verify on;
+      proxy_ssl_verify_depth 3;
+      proxy_ssl_trusted_certificate /opt/openresty-waf/certs/yellow-waf-ca.crt;
+      proxy_ssl_certificate /opt/openresty-waf/certs/blue-waf-client.crt;
+      proxy_ssl_certificate_key /opt/openresty-waf/certs/blue-waf-client.key;
+    }
+  }
+}
