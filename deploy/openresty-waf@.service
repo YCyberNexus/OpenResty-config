@@ -12,10 +12,10 @@ RuntimeDirectory=openresty-waf
 RuntimeDirectoryMode=0750
 UMask=0027
 
-ExecStartPre=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -t -q -g 'daemon on; master_process on;'
-ExecStart=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -g 'daemon on; master_process on;'
-ExecReload=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -s reload
-ExecStop=/usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -s quit
+ExecStartPre=/data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -t -q -g 'daemon on; master_process on;'
+ExecStart=/data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -g 'daemon on; master_process on;'
+ExecReload=/data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -s reload
+ExecStop=/data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-%i.conf -s quit
 
 Restart=on-failure
 RestartSec=5s

@@ -6,8 +6,8 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/openresty-waf}"
 RUN_GROUP="${RUN_GROUP:-nobody}"
-OPENRESTY="${OPENRESTY:-/usr/local/openresty/bin/openresty}"
-LUAJIT="${LUAJIT:-/usr/local/openresty/luajit/bin/luajit}"
+OPENRESTY="${OPENRESTY:-/data/openresty/bin/openresty}"
+LUAJIT="${LUAJIT:-/data/openresty/luajit/bin/luajit}"
 NODE_ROLE="${NODE_ROLE:-}"
 DATA_ROOT="${DATA_ROOT:-/data/openresty-waf}"
 

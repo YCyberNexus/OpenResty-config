@@ -7,7 +7,7 @@
 --   luajit scripts/check_rules.lua conf/waf_rules.lua
 --   luajit scripts/check_rules.lua --production conf/waf_rules.lua
 --   # 服务器上用 OpenResty 自带的 luajit：
---   /usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua
+--   /data/openresty/luajit/bin/luajit scripts/check_rules.lua
 -- 退出码：0=无 error；1=有 error；2=配置文件加载失败（多半是 Lua 语法错）。
 local here = (arg and arg[0] or ""):gsub("[^/]*$", "")  -- scripts/ 目录
 local root = here ~= "" and (here .. "../") or "./"

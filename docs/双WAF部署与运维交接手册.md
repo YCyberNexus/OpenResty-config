@@ -36,6 +36,8 @@ whitelist = {}
 
 ## 2. 交付文件
 
+安装包不包含 OpenResty 程序，直接使用两台服务器已有的 `/data/openresty/`。本项目文件安装到 `/opt/openresty-waf/`，审计日志写入 `/data/openresty-waf/`；三个目录用途不同，不存在目录覆盖冲突。
+
 | 文件 | 用途 |
 |---|---|
 | `conf/nginx-blue.conf.template` | 蓝区 WAF 生产模板 |
@@ -233,7 +235,7 @@ example = false
 
 ```bash
 cd /opt/openresty-waf
-/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua --production conf/waf_rules.lua
+/data/openresty/luajit/bin/luajit scripts/check_rules.lua --production conf/waf_rules.lua
 sha256sum conf/waf_rules.lua
 ```
 
@@ -487,15 +489,15 @@ certs/
 
 ```bash
 cd /opt/openresty-waf
-/usr/local/openresty/luajit/bin/luajit scripts/check_rules.lua --production conf/waf_rules.lua
+/data/openresty/luajit/bin/luajit scripts/check_rules.lua --production conf/waf_rules.lua
 sha256sum conf/waf_rules.lua
 ```
 
 按节点执行 OpenResty 检查：
 
 ```bash
-sudo /usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-yellow.conf -t
-sudo /usr/local/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-blue.conf -t
+sudo /data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-yellow.conf -t
+sudo /data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-blue.conf -t
 ```
 
 ### 8.2 正向用例
