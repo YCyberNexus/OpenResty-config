@@ -1,67 +1,100 @@
-# 蓝区 → 黄区双 WAF 白名单网关
+# 蓝区 → 黄区请求白名单网关
 
-本仓库提供公司三区架构中的通用七层 WAF 能力。固定网络路径是：
-
-```text
-蓝区调用方 → 蓝区 WAF →（mTLS，WAF-to-WAF）→ 黄区 WAF → 黄区已审批目标服务
-```
-
-WAF 核心不内置任何业务 URL。具体允许的 Host、method、path、请求体 schema、响应状态码和响应体 schema，全部由运维维护的 [conf/waf_rules.lua](conf/waf_rules.lua) 决定。两侧加载同一审批版本，未登记项默认拒绝。
-
-## 安全默认值
-
-仓库中的活动规则初始为空白名单：
+本仓库实现一个简化的双节点七层过滤链路：
 
 ```text
-version   = UNCONFIGURED-DENY-ALL
-whitelist = {}
+蓝区调用方 → 蓝区 WAF → HTTP → 黄区 WAF → 黄区目标服务
 ```
 
-因此代码或安装包不会自动放行知识库接口或其它 URL。生产模板还会拒绝 `UNCONFIGURED`/示例规则启动；运维完成审批并配置正式规则后才会出现业务放行项。
+用户于 2026-07-28 确认，蓝、黄服务器之间已经由四层网络策略限制为只允许双方登记的 IP 和端口互访。因此当前版本不配置 mTLS，来源限制由四层策略承担；七层只负责请求白名单和请求体过滤。
 
-用户提供的知识库接口被保留为[运维规则示例](conf/waf_rules_knowledge_example.lua)，不会被生产模板加载。接口来源见[知识库接口文档](docs/知识库接口文档.md)。
+## 当前能力
 
-## 通用能力
+- 只允许 `conf/waf_rules.lua` 中精确登记的 `method + path`。
+- 所有 query string 默认拒绝。
+- 配置 `request_schema` 的接口只接受 `application/json`，并校验字段、类型、长度、数量和数值范围。
+- object schema 必须设置 `additional_properties=false`，未知字段默认拒绝。
+- 校验通过后重新编码 JSON，再向下一跳转发。
+- 未配置 `request_schema` 的接口禁止携带请求体。
+- 不转发客户端原始请求头，只重建 Host、Content-Type、Content-Length、Accept 和 trace ID。
+- 响应由 Nginx 直接透传，不做状态码或响应体过滤。
+- 蓝、黄节点分别写本地 JSON Lines 审计日志。
 
-- 精确 Host、method 和 path 白名单；当前版本所有 query string 均拒绝。
-- 请求和响应分别绑定严格 JSON schema，object 未知字段默认拒绝。
-- 支持类型、required、长度、字节数、数值范围、数组数量、enum、prefix、UUID 和安全路径等通用约束。
-- 未登记响应状态、非 JSON、非法 JSON、超限或 schema 不匹配响应统一替换为不含上游正文的 `502`。
-- 蓝 WAF 到黄 WAF 强制 mTLS；黄 WAF 同时校验证书链和运维登记的客户端 Subject DN。
-- 请求和响应在校验通过后都规范化为单一 JSON 语义再传递；转发请求不继承原始请求头，只重建必要字段。
-- 蓝、黄两侧分别把每条 HTTP 请求持久化为 JSON Lines。
+WAF 不负责四层来源限制，也不替代防火墙、EDR、DLP、Jumpserver、文件外发审批或日志平台。
 
-## 审计位置
+## 最小规则文件
 
-蓝区服务器与黄区服务器使用相同的本机路径：
+活动规则文件是 `conf/waf_rules.lua`：
+
+```lua
+return {
+  max_request_body_bytes = 16384,
+  whitelist = {
+    {
+      id = "RULE-001",
+      methods = { "GET" },
+      path = "/health",
+    },
+    {
+      id = "RULE-002",
+      methods = { "POST" },
+      path = "/search",
+      request_schema = "search_request",
+    },
+  },
+  schemas = {
+    search_request = {
+      type = "object",
+      additional_properties = false,
+      required = { "query" },
+      properties = {
+        query = { type = "string", min_length = 1, max_length = 1000 },
+      },
+    },
+  },
+}
+```
+
+仓库默认 `whitelist = {}`，所以安装后不会自动放行任何业务接口。知识库规则只保存在 `conf/waf_rules_knowledge_example.lua`，供本地测试参考，不会被生产模板加载。
+
+不再要求 `version`、`direction`、`example` 或响应 schema。旧的 `--production` 参数仍可使用，但与普通检查完全相同：
+
+```bash
+luajit scripts/check_rules.lua conf/waf_rules.lua
+luajit scripts/check_rules.lua --production conf/waf_rules.lua
+make test
+```
+
+## 部署配置
+
+分别从以下模板生成蓝、黄节点配置：
+
+- `conf/nginx-blue.conf.template`
+- `conf/nginx-yellow.conf.template`
+
+必须替换模板中的监听 IP/端口、Host、对端 IP/端口和黄区目标服务 IP/端口。模板使用普通 HTTP，不需要证书文件。
+
+蓝、黄两侧应加载完全相同的 `conf/waf_rules.lua` 并核对 SHA-256。启动顺序为黄端先、蓝端后。
+
+完整操作见 `docs/双WAF部署与运维交接手册.md`，规则字段见 `docs/WAF规则配置指南.md`。
+
+## 审计
 
 ```text
 /data/openresty-waf/audit/access.log
+/data/openresty-waf/audit/rejected.log
 ```
 
-两区部署在不同服务器，不通过本地目录名区分来源；结构化日志中的节点角色和日志转储平台的主机元数据用于区分蓝、黄节点。
-
-审计包含 trace/request ID、节点、mTLS 身份、method、path、rule ID、规则版本、方向、审批编号、动作、原因、状态、耗时，以及收到的请求、规范化转发体、收到的上游响应和实际返回体的大小与 SHA-256；不保存 query string 或请求/响应正文。
-
-## 运维配置流程
-
-1. 根据审批台账编写 `conf/waf_rules.lua`，或以知识库示例为起点。
-2. 设置 `example=false`、唯一 `version`、明确 `direction` 和稳定 rule ID。
-3. 执行 `luajit scripts/check_rules.lua --production conf/waf_rules.lua`。
-4. 将同一文件同步到蓝、黄两侧，并核对 SHA-256。
-5. 渲染蓝/黄 nginx 模板中的地址、证书身份、目标服务和审批编号。
-6. 运行 `scripts/server-setup.sh`；脚本会再次检查规则、占位符和 OpenResty 配置。
-
-完整的首次部署、直接覆盖升级、证书、验收、日常运维和回滚要求见[双 WAF 部署与运维交接手册](docs/双WAF部署与运维交接手册.md)。
+日志记录节点、来源地址、Host、method、path、rule ID、动作、拒绝原因、请求体大小和 SHA-256、上游地址与状态；不记录 query 或正文原文。
 
 ## 本地验证
 
 ```bash
-make lint   # 检查活动规则；初始空白名单会产生一条“全部拒绝” warning
+make lint
 make test
 ```
 
-安装 OpenResty 后，以下命令会显式加载知识库示例规则和本地 stub，仅用于演示通用能力：
+安装 OpenResty 后可以运行本地示例：
 
 ```bash
 make serve
@@ -69,16 +102,13 @@ make smoke
 make stop
 ```
 
-## 核心目录
+## 核心文件
 
 ```text
-conf/waf_rules.lua                       运维活动规则，默认空白名单
-conf/waf_rules_knowledge_example.lua     不自动生效的知识库规则示例
-lua/waf/decision.lua                     Host/header/URL/request/response 决策链
-lua/waf/json_validator.lua               通用严格 JSON 校验器
-lua/waf/handler.lua                      OpenResty IO、受控代理与审计摘要
-conf/nginx-*.conf.template               蓝/黄生产节点 mTLS 模板
-spec/                                    通用能力和示例配置测试
+conf/waf_rules.lua                    活动白名单，默认全拒绝
+conf/waf_rules_knowledge_example.lua  本地请求过滤示例
+lua/waf/decision.lua                  method/path/query 请求决策
+lua/waf/json_validator.lua            JSON 请求体校验
+lua/waf/handler.lua                   OpenResty 请求处理
+conf/nginx-*.conf.template            蓝、黄节点 HTTP 转发模板
 ```
-
-本仓库只实现七层 WAF，不替代 EDR、AC、防火墙、DLP、ODCP、AD、Jumpserver、VDI 或日志平台，也不授权黄区外网、服务器直连或绕过两侧 WAF 的路径。

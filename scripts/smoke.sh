@@ -18,8 +18,8 @@ check() {
 }
 
 echo "smoke against $BASE"
-check "GET health: allow + validate response" 200 "$BASE/ai/knowledge/health"
-check "POST search: allow + validate both bodies" 200 \
+check "GET health: allow" 200 "$BASE/ai/knowledge/health"
+check "POST search: allow + validate request body" 200 \
   -X POST "$BASE/ai/knowledge/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"机台发生通信异常时应该如何处理？","top_k":5}'
@@ -34,11 +34,8 @@ check "unknown request field: deny" 400 \
   -d '{"query":"q","tenant":"unknown"}'
 check "non-JSON content type: deny" 415 \
   -X POST "$BASE/ai/knowledge/search" -H 'Content-Type: text/plain' -d 'q'
-check "method override header: deny" 403 \
+check "method override header is ignored and not forwarded" 200 \
   -X POST "$BASE/ai/knowledge/search" -H 'Content-Type: application/json' \
   -H 'X-HTTP-Method-Override: GET' -d '{"query":"q"}'
-check "compressed request marker: deny" 403 \
-  -X POST "$BASE/ai/knowledge/search" -H 'Content-Type: application/json' \
-  -H 'Content-Encoding: gzip' -d '{"query":"q"}'
 
 exit "$fail"

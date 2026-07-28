@@ -56,32 +56,4 @@ describe("json_validator", function()
     assert.is_false(check:validate({}))
   end)
 
-  it("accepts nullable result fields only when represented as JSON null", function()
-    local response = fixtures.search_response()
-    response.results[1].page_number = json.null
-    response.results[1].section_title = json.null
-    assert.is_true(validator("knowledge_search_response"):validate(response, {
-      request_body = fixtures.search_request(),
-    }))
-  end)
-
-  it("rejects traversal in asset and metadata paths", function()
-    local response = fixtures.search_response()
-    response.results[1].asset_key = "../secrets.txt"
-    local ok, err = validator("knowledge_search_response"):validate(response, {
-      request_body = fixtures.search_request(),
-    })
-    assert.is_false(ok)
-    assert.are.equal("results[1].asset_key", err.field)
-  end)
-
-  it("rejects undocumented metadata fields", function()
-    local response = fixtures.search_response()
-    response.results[1].metadata.internal_ip = "10.0.0.1"
-    local ok, err = validator("knowledge_search_response"):validate(response, {
-      request_body = fixtures.search_request(),
-    })
-    assert.is_false(ok)
-    assert.are.equal("results[1].metadata.internal_ip", err.field)
-  end)
 end)

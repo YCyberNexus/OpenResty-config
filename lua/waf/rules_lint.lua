@@ -3,14 +3,8 @@ local JsonValidator = require("waf.json_validator")
 
 local M = {}
 local KNOWN_CONFIG_KEYS = {
-  version = true,
-  direction = true,
-  example = true,
   max_request_body_bytes = true,
-  max_response_body_bytes = true,
   whitelist = true,
-  blacklist = true,
-  forbidden_headers = true,
   schemas = true,
 }
 local KNOWN_WHITELIST_KEYS = {
@@ -18,16 +12,10 @@ local KNOWN_WHITELIST_KEYS = {
   methods = true,
   path = true,
   request_schema = true,
-  response_schemas = true,
   -- 保留这些旧/不安全关键字只为给出有针对性的迁移错误，而不是静默忽略。
   pattern = true,
   allow_query = true,
   body = true,
-}
-local KNOWN_BLACKLIST_KEYS = {
-  methods = true,
-  path = true,
-  pattern = true,
 }
 local KNOWN_METHODS = {
   GET = true, POST = true, PUT = true, PATCH = true, DELETE = true,
@@ -266,8 +254,7 @@ local function check_schema(schema, at, add)
   end
 end
 
-function M.lint(config, opts)
-  opts = opts or {}
+function M.lint(config)
   local issues = {}
   local function add(level, where, message)
     issues[#issues + 1] = { level = level, where = where, msg = message }
@@ -288,45 +275,14 @@ function M.lint(config, opts)
   end
 
   local whitelist = table_field("whitelist")
-  local blacklist = table_field("blacklist")
   local schemas = table_field("schemas")
   if type(config.whitelist) == "table" and not is_array(config.whitelist) then
     add("error", "whitelist", "whitelist 必须是连续数组")
   end
-  if type(config.blacklist) == "table" and not is_array(config.blacklist) then
-    add("error", "blacklist", "blacklist 必须是连续数组")
-  end
-
-  if type(config.direction) ~= "string" or config.direction == "" then
-    add("error", "direction", "必须配置非空方向标识；具体方向由运维白名单台账决定")
-  end
-  if type(config.version) ~= "string" or config.version == "" then
-    add("error", "version", "必须配置非空规则版本")
-  end
-  if config.example ~= nil and type(config.example) ~= "boolean" then
-    add("error", "example", "example 只能是 boolean")
-  end
-  if opts.production then
-    local version = tostring(config.version or "")
-    if config.example == true or version:match("^EXAMPLE") then
-      add("error", "example", "示例规则不能作为生产活动规则；请完成审批、更新版本并设置 example=false")
-    end
-    if version:match("^UNCONFIGURED") or config.direction == "not_configured" then
-      add("error", "version", "生产部署前必须由运维填写正式规则版本和方向")
-    end
-    if config.example == nil then
-      add("error", "example", "生产活动规则必须显式设置 example=false")
-    end
-  end
-  for _, key in ipairs({ "max_request_body_bytes", "max_response_body_bytes" }) do
-    if not positive_integer(config[key]) then
-      add("error", key, key .. " 必须是大于 0 的整数")
-    end
-  end
-  if positive_integer(config.max_request_body_bytes)
-    and positive_integer(config.max_response_body_bytes)
-    and config.max_response_body_bytes < config.max_request_body_bytes then
-    add("warn", "max_response_body_bytes", "响应上限小于请求上限，请确认不是误配")
+  if not positive_integer(config.max_request_body_bytes) then
+    add("error", "max_request_body_bytes", "max_request_body_bytes 必须是大于 0 的整数")
+  elseif config.max_request_body_bytes > 16384 then
+    add("error", "max_request_body_bytes", "不得超过 Nginx client_max_body_size 的 16384 字节")
   end
 
   if not nonempty_array(whitelist) then
@@ -382,38 +338,6 @@ function M.lint(config, opts)
       end
     end
 
-    if type(rule.response_schemas) ~= "table" or next(rule.response_schemas) == nil then
-      add("error", at .. ".response_schemas", "每条 URL 必须显式登记允许的响应状态与 schema")
-    else
-      for status, schema_name in pairs(rule.response_schemas) do
-        local numeric = tonumber(status)
-        if type(status) ~= "string" or not numeric or numeric < 100 or numeric > 599
-          or numeric ~= math.floor(numeric) or #status ~= 3 then
-          add("error", at .. ".response_schemas", "响应状态键必须是三位字符串，如 \"200\"")
-        end
-        if type(schema_name) ~= "string" or schemas[schema_name] == nil then
-          add("error", at .. ".response_schemas", "引用了不存在的响应 schema：" .. tostring(schema_name))
-        else
-          referenced[schema_name] = true
-        end
-      end
-    end
-  end
-
-  for i, rule in ipairs(blacklist) do
-    local at = "blacklist[" .. i .. "]"
-    if type(rule) == "table" then check_known_keys(rule, KNOWN_BLACKLIST_KEYS, at, add) end
-    if type(rule) ~= "table" or (rule.path == nil and rule.pattern == nil) then
-      add("error", at, "黑名单规则必须有 path 或 pattern")
-    elseif rule.path ~= nil and rule.pattern ~= nil then
-      add("error", at, "黑名单 path 与 pattern 只能配置一个")
-    elseif rule.path ~= nil and (type(rule.path) ~= "string" or rule.path:sub(1, 1) ~= "/") then
-      add("error", at .. ".path", "黑名单 path 必须是绝对路径")
-    elseif rule.pattern ~= nil and (type(rule.pattern) ~= "string" or rule.pattern == "") then
-      add("error", at .. ".pattern", "黑名单 pattern 必须是非空字符串")
-    elseif rule.methods ~= nil then
-      check_methods(rule, at, add)
-    end
   end
 
   for name, schema in pairs(schemas) do
@@ -422,25 +346,7 @@ function M.lint(config, opts)
     end
     check_schema(schema, "schemas." .. tostring(name), add)
     if not referenced[name] then
-      add("warn", "schemas." .. tostring(name), "schema 未被任何请求或响应规则引用")
-    end
-  end
-
-  local forbidden_headers = config.forbidden_headers
-  if type(forbidden_headers) ~= "table" then
-    add("error", "forbidden_headers", "forbidden_headers 必须是数组")
-  elseif not is_array(forbidden_headers) then
-    add("error", "forbidden_headers", "forbidden_headers 必须是连续数组")
-  else
-    for i, header in ipairs(forbidden_headers) do
-      local at = "forbidden_headers[" .. i .. "]"
-      if type(header) ~= "string" or header == "" or header == "*" then
-        add("error", at, "请求头名必须是非空字符串，且不能是裸 *")
-      elseif header ~= header:lower() then
-        add("warn", at, "请求头名建议全部小写")
-      elseif header:find("*", 1, true) and header:sub(-1) ~= "*" then
-        add("error", at, "通配符只允许位于末尾做前缀匹配")
-      end
+      add("warn", "schemas." .. tostring(name), "schema 未被任何请求规则引用")
     end
   end
 

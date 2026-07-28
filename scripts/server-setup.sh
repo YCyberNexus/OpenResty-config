@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 准备单个生产 WAF 节点。只创建目录/权限并校验已渲染配置，不替用户猜测地址、端口或证书身份。
+# 准备单个 WAF 节点。只创建目录/权限并校验已渲染配置，不替用户猜测地址或端口。
 # 用法：sudo NODE_ROLE=blue bash /opt/openresty-waf/scripts/server-setup.sh
 #       sudo NODE_ROLE=yellow bash /opt/openresty-waf/scripts/server-setup.sh
 set -euo pipefail
@@ -59,16 +59,13 @@ done
 echo "  审计：$DATA_ROOT/audit/access.log"
 echo "  运行日志：$DATA_ROOT/log/error.log"
 
-echo "== 2. 加固程序与证书权限 =="
+echo "== 2. 加固程序权限 =="
 chown -R "root:$RUN_GROUP" "$PREFIX"
 find "$PREFIX" -type d -exec chmod 0750 {} +
 find "$PREFIX" -type f -exec chmod 0640 {} +
-if [[ -d "$PREFIX/certs" ]]; then
-  find "$PREFIX/certs" -type f -name '*.key' -exec chmod 0640 {} +
-fi
 
 echo "== 3. 规则与 nginx 配置校验 =="
-"$LUAJIT" "${PREFIX}/scripts/check_rules.lua" --production "${PREFIX}/conf/waf_rules.lua"
+"$LUAJIT" "${PREFIX}/scripts/check_rules.lua" "${PREFIX}/conf/waf_rules.lua"
 echo "  活动规则 SHA-256：$(sha256sum "${PREFIX}/conf/waf_rules.lua" | awk '{print $1}')"
 "$OPENRESTY" -p "$PREFIX/" -c "conf/nginx-$NODE_ROLE.conf" -t
 
@@ -83,8 +80,9 @@ cat <<EOF
    setsebool -P httpd_can_network_connect 1
    并按审批端口配置 http_port_t（接口文档没有端口，本脚本不代填）。
 
-2. 只放行已审批方向：蓝区业务 -> 蓝 WAF；蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。
-   蓝、黄两侧 conf/waf_rules.lua 必须来自同一审批版本并具有相同 SHA-256。
+2. 核对四层策略只允许已登记的源、目标 IP 和端口：蓝区业务 -> 蓝 WAF；
+   蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。蓝、黄两侧 conf/waf_rules.lua
+   必须完全相同并具有相同 SHA-256。
 
 3. 安装并启动实例服务：
    cp "$PREFIX/deploy/openresty-waf@.service" /etc/systemd/system/

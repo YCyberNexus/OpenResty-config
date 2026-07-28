@@ -10,7 +10,7 @@ test:
 lint:
 	@luajit scripts/check_rules.lua
 
-# 上线门禁：拒绝 UNCONFIGURED、示例规则和其它生产不完整配置
+# 兼容旧命令；简化版与 lint 使用同一套检查。
 lint-production:
 	@luajit scripts/check_rules.lua --production conf/waf_rules.lua
 
