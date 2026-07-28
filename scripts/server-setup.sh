@@ -66,7 +66,6 @@ find "$PREFIX" -type f -exec chmod 0640 {} +
 
 echo "== 3. 规则与 nginx 配置校验 =="
 "$LUAJIT" "${PREFIX}/scripts/check_rules.lua" "${PREFIX}/conf/waf_rules.lua"
-echo "  活动规则 SHA-256：$(sha256sum "${PREFIX}/conf/waf_rules.lua" | awk '{print $1}')"
 "$OPENRESTY" -p "$PREFIX/" -c "conf/nginx-$NODE_ROLE.conf" -t
 
 cat <<EOF
@@ -82,12 +81,14 @@ cat <<EOF
 
 2. 核对四层策略只允许已登记的源、目标 IP 和端口：蓝区业务 -> 蓝 WAF；
    蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。蓝、黄两侧 conf/waf_rules.lua
-   必须完全相同并具有相同 SHA-256。
+   必须分发同一份规则文件。
 
-3. 安装并启动实例服务：
-   cp "$PREFIX/deploy/openresty-waf@.service" /etc/systemd/system/
+3. 安装或更新服务单元（此时不启动）：
+   install -o root -g root -m 0644 "$PREFIX/deploy/openresty-waf@.service" /etc/systemd/system/openresty-waf@.service
    systemctl daemon-reload
+
+4. 完成四层策略验收后，再启动实例：
    systemctl enable --now "openresty-waf@$NODE_ROLE"
 
-4. 用真实放行/拒绝用例核对 $DATA_ROOT/audit/access.log；配置日志轮转、留存期和防篡改转储。
+5. 用真实放行/拒绝用例核对 $DATA_ROOT/audit/access.log；配置日志轮转、留存期和防篡改转储。
 EOF

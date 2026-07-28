@@ -74,7 +74,7 @@ make test
 
 必须替换模板中的监听 IP/端口、Host、对端 IP/端口和黄区目标服务 IP/端口。模板使用普通 HTTP，不需要证书文件。
 
-蓝、黄两侧应加载完全相同的 `conf/waf_rules.lua` 并核对 SHA-256。启动顺序为黄端先、蓝端后。
+蓝、黄两侧应分发同一份 `conf/waf_rules.lua`。启动顺序为黄端先、蓝端后。
 
 完整操作见 `docs/双WAF部署与运维交接手册.md`，规则字段见 `docs/WAF规则配置指南.md`。
 

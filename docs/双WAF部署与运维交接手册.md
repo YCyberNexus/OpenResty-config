@@ -73,10 +73,9 @@ return {
 ```bash
 cd /opt/openresty-waf
 /data/openresty/luajit/bin/luajit scripts/check_rules.lua conf/waf_rules.lua
-sha256sum conf/waf_rules.lua
 ```
 
-蓝、黄两侧规则文件必须完全相同。空白名单允许通过静态检查，但会输出 warning，并拒绝全部业务请求。
+蓝、黄两侧应分发同一份规则文件。空白名单允许通过静态检查，但会输出 warning，并拒绝全部业务请求。
 
 ## 4. 渲染节点配置
 
@@ -97,6 +96,12 @@ vi conf/nginx-yellow.conf
 - `__PROTECTED_SERVICE_PORT__`
 - `__PROTECTED_SERVICE_HOST__`
 
+黄端确认无占位符残留：
+
+```bash
+grep -En '__[A-Z0-9_]+__' conf/nginx-yellow.conf
+```
+
 ### 4.2 蓝区
 
 ```bash
@@ -114,32 +119,108 @@ vi conf/nginx-blue.conf
 - `__YELLOW_WAF_PORT__`
 - `__YELLOW_WAF_HOST__`
 
-确认没有遗漏占位符：
+蓝端确认无占位符残留：
 
 ```bash
-grep -R -nE '__[A-Z0-9_]+__' conf/nginx-blue.conf conf/nginx-yellow.conf
+grep -En '__[A-Z0-9_]+__' conf/nginx-blue.conf
 ```
 
 命令无输出才可继续。
 
-## 5. 安装目录与权限
+## 5. 安装与旧流程续装
 
-首次部署：
+先判断本节点是否已经存在旧目录：
 
 ```bash
-mkdir -p /opt
-tar -xzf /tmp/openresty-waf.tgz -C /opt
+test -d /opt/openresty-waf && echo "存在旧目录，按 5.2 续装" || echo "按 5.1 全新安装"
+```
+
+如果旧部署正好在原手册的 `check_rules.lua --production` 步骤报错并停止，而且尚未启动 systemd 服务，不需要执行卸载；直接按 5.2 备份并覆盖即可。
+
+### 5.1 全新安装
+
+仅在 `/opt/openresty-waf` 不存在时执行：
+
+```bash
+sudo mkdir -p /opt
+sudo tar -xzf /tmp/openresty-waf-simplify.tgz -C /opt
 cd /opt/openresty-waf
 ```
 
-分别在对应节点执行：
+然后按第 4 节从当前新模板生成本节点的 `nginx-yellow.conf` 或 `nginx-blue.conf`，填写 `conf/waf_rules.lua`，再执行 5.3。
+
+### 5.2 原部署中断或已有旧目录时续装
+
+本节正是截图所示场景的续装步骤。蓝、黄节点分别操作，黄端使用 `NODE_ROLE=yellow`，蓝端使用 `NODE_ROLE=blue`。
+
+1. 将新包放到两台服务器的 `/tmp/openresty-waf-simplify.tgz`。
+2. 如果旧服务从未启动，下面的停止命令不会造成影响；如果已启动，则先停止当前节点。
+3. 备份整个旧目录后再覆盖，不能直接删除旧目录。
+
+黄端执行：
 
 ```bash
+sudo systemctl disable --now openresty-waf.service 2>/dev/null || true
+sudo systemctl disable --now openresty-waf@yellow.service 2>/dev/null || true
+sudo tar -C /opt -czf "/root/openresty-waf-before-simplify-yellow-$(date +%Y%m%d%H%M%S).tgz" openresty-waf
+sudo tar --overwrite -xzf /tmp/openresty-waf-simplify.tgz -C /opt
+cd /opt/openresty-waf
+sudo cp conf/nginx-yellow.conf.template conf/nginx-yellow.conf
+sudo vi conf/nginx-yellow.conf
+sudo vi conf/waf_rules.lua
+```
+
+蓝端执行：
+
+```bash
+sudo systemctl disable --now openresty-waf.service 2>/dev/null || true
+sudo systemctl disable --now openresty-waf@blue.service 2>/dev/null || true
+sudo tar -C /opt -czf "/root/openresty-waf-before-simplify-blue-$(date +%Y%m%d%H%M%S).tgz" openresty-waf
+sudo tar --overwrite -xzf /tmp/openresty-waf-simplify.tgz -C /opt
+cd /opt/openresty-waf
+sudo cp conf/nginx-blue.conf.template conf/nginx-blue.conf
+sudo vi conf/nginx-blue.conf
+sudo vi conf/waf_rules.lua
+```
+
+覆盖后必须注意：
+
+- 旧 `nginx-blue.conf`、`nginx-yellow.conf` 包含 TLS、证书或旧内部代理配置，不能恢复；必须从新模板重新生成。
+- 新包会把活动规则恢复为空白名单。需要实际放行业务时，必须把同一份简化规则写入两台服务器；否则所有业务请求都会返回拒绝。
+- 旧 `certs/` 目录即使仍存在也不会被新配置引用，不需要为本次续装安装、更新或删除证书。
+- 不需要再次执行旧命令 `check_rules.lua --production`；新流程使用第 3 节的不带 `--production` 命令。
+
+确认本节点配置没有残留占位符。黄端执行：
+
+```bash
+grep -En '__[A-Z0-9_]+__' conf/nginx-yellow.conf
+```
+
+蓝端执行：
+
+```bash
+grep -En '__[A-Z0-9_]+__' conf/nginx-blue.conf
+```
+
+命令无输出才可继续。
+
+### 5.3 公共准备步骤
+
+黄端执行：
+
+```bash
+cd /opt/openresty-waf
 sudo NODE_ROLE=yellow bash scripts/server-setup.sh
+```
+
+蓝端执行：
+
+```bash
+cd /opt/openresty-waf
 sudo NODE_ROLE=blue bash scripts/server-setup.sh
 ```
 
-脚本会创建：
+脚本会创建或修正：
 
 ```text
 /data/openresty-waf/audit/access.log
@@ -147,7 +228,15 @@ sudo NODE_ROLE=blue bash scripts/server-setup.sh
 /data/openresty-waf/log/error.log
 ```
 
-并检查规则、模板占位符和 OpenResty 配置。
+并检查规则、模板占位符和 OpenResty 配置。该脚本不会安装或启动 systemd 服务，因此两端还要分别执行：
+
+```bash
+cd /opt/openresty-waf
+sudo install -o root -g root -m 0644 deploy/openresty-waf@.service /etc/systemd/system/openresty-waf@.service
+sudo systemctl daemon-reload
+```
+
+这一步只安装或更新服务单元，不会启动 WAF。完成后继续执行第 6 节四层验收和第 7 节启动步骤。
 
 ## 6. 四层策略验收
 
@@ -161,20 +250,43 @@ sudo NODE_ROLE=blue bash scripts/server-setup.sh
 
 具体 IP、网段和端口不在仓库中，不得从模板占位符推断。
 
-## 7. 配置检查与启动
+## 7. 系统策略、配置检查与启动
+
+### 7.1 SELinux（仅 Enforcing 节点）
+
+先执行：
+
+```bash
+getenforce
+```
+
+只有输出 `Enforcing` 时才需要处理本小节。按现场安全基线确认后执行：
+
+```bash
+sudo semanage fcontext -a -t httpd_sys_content_t '/opt/openresty-waf(/.*)?'
+sudo semanage fcontext -a -t httpd_log_t '/data/openresty-waf(/.*)?'
+sudo restorecon -Rv /opt/openresty-waf /data/openresty-waf
+sudo setsebool -P httpd_can_network_connect 1
+```
+
+如果上述文件上下文规则已存在，将对应命令的 `-a` 改为 `-m`。如果 WAF 监听端口不在现有 `http_port_t` 中，还需要由现场管理员将本节点的实际监听端口登记为 `http_port_t`。手册不代填端口。
+
+### 7.2 检查并启动
 
 黄端：
 
 ```bash
 /data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-yellow.conf -t
-sudo systemctl enable --now openresty-waf@yellow
+sudo systemctl enable --now openresty-waf@yellow.service
+sudo systemctl status openresty-waf@yellow.service --no-pager
 ```
 
 蓝端：
 
 ```bash
 /data/openresty/bin/openresty -p /opt/openresty-waf/ -c conf/nginx-blue.conf -t
-sudo systemctl enable --now openresty-waf@blue
+sudo systemctl enable --now openresty-waf@blue.service
+sudo systemctl status openresty-waf@blue.service --no-pager
 ```
 
 启动顺序为黄端先、蓝端后。变更 reload 同样先黄后蓝。
@@ -219,7 +331,7 @@ tail -f /data/openresty-waf/audit/rejected.log
 
 1. 修改 `conf/waf_rules.lua`。
 2. 执行规则检查和测试。
-3. 将同一规则文件同步到黄、蓝节点并核对 SHA-256。
+3. 将同一规则文件同步到黄、蓝节点。
 4. 黄端先 reload 并验证，再 reload 蓝端。
 5. 执行放行、拒绝和四层旁路用例。
 
@@ -258,7 +370,7 @@ conf/nginx-yellow.conf
 
 - [ ] 四层源 IP、目标 IP、方向和端口已核对。
 - [ ] 非登记来源及绕过路径实测失败。
-- [ ] 蓝、黄规则文件 SHA-256 相同。
+- [ ] 蓝、黄节点使用同一份规则文件。
 - [ ] 规则检查为 `0 error`。
 - [ ] 两端 OpenResty 配置检查通过。
 - [ ] 正向、拒绝、请求体和旁路用例通过。

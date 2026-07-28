@@ -4,7 +4,7 @@
 # 等开发期内容。
 #
 # 用法(在仓库根目录执行):
-#   bash scripts/package.sh                 # 生成 openresty-waf.tgz
+#   bash scripts/package.sh                 # 生成 openresty-waf-simplify.tgz
 #   bash scripts/package.sh /tmp/waf.tgz    # 指定输出路径
 set -euo pipefail
 
@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 PKG_NAME="openresty-waf"        # 解包后的顶层目录名
-OUT="${1:-$ROOT/openresty-waf.tgz}"
+OUT="${1:-$ROOT/openresty-waf-simplify.tgz}"
 
 # 运行期 + 部署需要随包带上的文件(logs/ 不带,在服务器上现建)
 FILES=(

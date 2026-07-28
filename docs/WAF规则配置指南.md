@@ -92,7 +92,6 @@ search_request = {
 ```bash
 luajit scripts/check_rules.lua conf/waf_rules.lua
 make test
-sha256sum conf/waf_rules.lua
 ```
 
 旧命令中的 `--production` 参数兼容保留，但不会再要求 `version` 或 `direction`：
@@ -101,4 +100,4 @@ sha256sum conf/waf_rules.lua
 luajit scripts/check_rules.lua --production conf/waf_rules.lua
 ```
 
-蓝、黄两端必须使用相同规则文件。发布前还需核对四层策略中的源 IP、目标 IP、方向和端口，确认其它主机无法直达 WAF 或目标服务。
+蓝、黄两端必须分发同一份规则文件。发布前还需核对四层策略中的源 IP、目标 IP、方向和端口，确认其它主机无法直达 WAF 或目标服务。
