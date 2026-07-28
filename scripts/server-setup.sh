@@ -45,10 +45,10 @@ if grep -Eq '__[A-Z0-9_]+__' "$CONFIG"; then
 fi
 
 echo "== 1. 准备持久化审计目录 =="
-install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/$NODE_ROLE/audit"
-install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/$NODE_ROLE/log"
-for log_file in "$DATA_ROOT/$NODE_ROLE/audit/access.log" "$DATA_ROOT/$NODE_ROLE/audit/rejected.log" \
-  "$DATA_ROOT/$NODE_ROLE/log/error.log"; do
+install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/audit"
+install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/log"
+for log_file in "$DATA_ROOT/audit/access.log" "$DATA_ROOT/audit/rejected.log" \
+  "$DATA_ROOT/log/error.log"; do
   if [[ ! -e "$log_file" ]]; then
     install -o root -g "$RUN_GROUP" -m 0640 /dev/null "$log_file"
   else
@@ -56,8 +56,8 @@ for log_file in "$DATA_ROOT/$NODE_ROLE/audit/access.log" "$DATA_ROOT/$NODE_ROLE/
     chmod 0640 "$log_file"
   fi
 done
-echo "  审计：$DATA_ROOT/$NODE_ROLE/audit/access.log"
-echo "  运行日志：$DATA_ROOT/$NODE_ROLE/log/error.log"
+echo "  审计：$DATA_ROOT/audit/access.log"
+echo "  运行日志：$DATA_ROOT/log/error.log"
 
 echo "== 2. 加固程序与证书权限 =="
 chown -R "root:$RUN_GROUP" "$PREFIX"
@@ -91,5 +91,5 @@ cat <<EOF
    systemctl daemon-reload
    systemctl enable --now "openresty-waf@$NODE_ROLE"
 
-4. 用真实放行/拒绝用例核对 $DATA_ROOT/$NODE_ROLE/audit/access.log；配置日志轮转、留存期和防篡改转储。
+4. 用真实放行/拒绝用例核对 $DATA_ROOT/audit/access.log；配置日志轮转、留存期和防篡改转储。
 EOF

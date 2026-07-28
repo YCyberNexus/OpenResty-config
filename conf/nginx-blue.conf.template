@@ -3,7 +3,7 @@
 # 蓝区服务 -> 本 WAF -> mTLS -> 黄区 WAF。
 user nobody;
 worker_processes auto;
-error_log /data/openresty-waf/blue/log/error.log info;
+error_log /data/openresty-waf/log/error.log info;
 pid /run/openresty-waf/blue.pid;
 
 events { worker_connections 2048; }
@@ -34,7 +34,7 @@ http {
     set $waf_trace_id $request_id;
     set $waf_upstream_target "__YELLOW_WAF_HOST__:__YELLOW_WAF_PORT__";
     include conf/waf-audit-vars.conf;
-    access_log /data/openresty-waf/blue/audit/rejected.log waf_reject;
+    access_log /data/openresty-waf/audit/rejected.log waf_reject;
     return 444;
   }
 
@@ -51,7 +51,7 @@ http {
     set $waf_trace_id $request_id;
     set $waf_upstream_target "__YELLOW_WAF_HOST__:__YELLOW_WAF_PORT__";
     include conf/waf-audit-vars.conf;
-    access_log /data/openresty-waf/blue/audit/access.log waf_audit;
+    access_log /data/openresty-waf/audit/access.log waf_audit;
     add_header X-Request-ID $waf_trace_id always;
 
     include conf/waf-public-location.conf;

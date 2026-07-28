@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 在开发机(macOS)上,把「运行期需要的文件 + 部署辅助」打成一个干净 tar 包,
-# 供离线拷贝到 CentOS 服务器。不含 spec/ docs/ Makefile/ .git/ .idea/ 等开发期内容。
+# 供离线拷贝到 CentOS 服务器。只携带指定运维文档，不含 spec/ Makefile/ .git/ .idea/
+# 等开发期内容。
 #
 # 用法(在仓库根目录执行):
 #   bash scripts/package.sh                 # 生成 openresty-waf.tgz
@@ -35,7 +36,7 @@ FILES=(
   scripts/server-setup.sh
   scripts/check_rules.lua
   deploy/openresty-waf@.service
-  docs/双WAF白名单链路部署说明.md
+  docs/双WAF部署与运维交接手册.md
   docs/知识库接口文档.md
 )
 
@@ -60,6 +61,3 @@ rm -rf "$TMP"
 echo "打包完成: $OUT"
 echo "内容:"
 tar -tzf "$OUT" | sed 's/^/  /'
-echo
-echo "校验(传到服务器后核对): shasum -a 256 $OUT"
-shasum -a 256 "$OUT" 2>/dev/null || true

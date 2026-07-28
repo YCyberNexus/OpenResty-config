@@ -33,10 +33,13 @@ whitelist = {}
 
 ## 审计位置
 
+蓝区服务器与黄区服务器使用相同的本机路径：
+
 ```text
-/data/openresty-waf/blue/audit/access.log
-/data/openresty-waf/yellow/audit/access.log
+/data/openresty-waf/audit/access.log
 ```
+
+两区部署在不同服务器，不通过本地目录名区分来源；结构化日志中的节点角色和日志转储平台的主机元数据用于区分蓝、黄节点。
 
 审计包含 trace/request ID、节点、mTLS 身份、method、path、rule ID、规则版本、方向、审批编号、动作、原因、状态、耗时，以及收到的请求、规范化转发体、收到的上游响应和实际返回体的大小与 SHA-256；不保存 query string 或请求/响应正文。
 
@@ -49,7 +52,7 @@ whitelist = {}
 5. 渲染蓝/黄 nginx 模板中的地址、证书身份、目标服务和审批编号。
 6. 运行 `scripts/server-setup.sh`；脚本会再次检查规则、占位符和 OpenResty 配置。
 
-完整格式、部署和验收要求见[双 WAF 白名单链路部署说明](docs/双WAF白名单链路部署说明.md)。
+完整的首次部署、直接覆盖升级、证书、验收、日常运维和回滚要求见[双 WAF 部署与运维交接手册](docs/双WAF部署与运维交接手册.md)。
 
 ## 本地验证
 
