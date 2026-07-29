@@ -76,7 +76,8 @@ make test
 
 蓝、黄两侧应分发同一份 `conf/waf_rules.lua`。启动顺序为黄端先、蓝端后。
 
-完整操作见 `docs/双WAF部署与运维交接手册.md`，规则字段见 `docs/WAF规则配置指南.md`。
+完整操作见 `docs/双WAF部署与运维交接手册.md`，快速生效验证见
+`docs/双WAF生效验证与验收手册.md`，规则字段见 `docs/WAF规则配置指南.md`。
 
 ## 审计
 

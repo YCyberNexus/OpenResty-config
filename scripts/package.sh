@@ -36,6 +36,7 @@ FILES=(
   scripts/check_rules.lua
   deploy/openresty-waf@.service
   docs/双WAF部署与运维交接手册.md
+  docs/双WAF生效验证与验收手册.md
   docs/WAF规则配置指南.md
   docs/绿蓝黄数据链路白名单台账.md
   docs/知识库接口文档.md
