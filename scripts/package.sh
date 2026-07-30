@@ -37,12 +37,10 @@ FILES=(
   scripts/server-setup.sh
   scripts/check_rules.lua
   deploy/openresty-waf@.service
-  docs/双WAF部署与运维交接手册.md
-  docs/双WAF生效验证与验收手册.md
-  docs/WAF规则配置指南.md
+  docs/WAF部署配置与升级手册.md
+  docs/architecture/数据安全策略图-整改目标.png
   docs/绿蓝黄数据链路白名单台账.md
   docs/知识库接口文档.md
-  docs/多黄区目标同路径接口WAF配置与上线手册.md
 )
 
 TMP="$(mktemp -d)"

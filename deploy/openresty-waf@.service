@@ -1,6 +1,6 @@
 [Unit]
 Description=OpenResty WAF node (%i)
-Documentation=file:///opt/openresty-waf/docs/双WAF部署与运维交接手册.md
+Documentation=file:///opt/openresty-waf/docs/WAF部署配置与升级手册.md
 After=network-online.target remote-fs.target nss-lookup.target
 Wants=network-online.target
 ConditionPathExists=/opt/openresty-waf/conf/nginx-%i.conf
