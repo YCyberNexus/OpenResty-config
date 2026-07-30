@@ -41,6 +41,15 @@ local function sha256(value)
   return to_hex(ngx.sha256_bin(value))
 end
 
+local function read_body_file(path)
+  if type(path) ~= "string" or path == "" then return nil end
+  local file = io.open(path, "rb")
+  if not file then return nil end
+  local body = file:read("*a")
+  file:close()
+  return body
+end
+
 local function request_id()
   local trace = ngx.var.waf_trace_id
   if trace and trace ~= "" and trace ~= "-" then return trace end
@@ -60,6 +69,9 @@ local function write_json(status, payload)
     status = 500
     encoded = '{"error":"response_encoding_failed"}'
   end
+  set_var("waf_forward_response_body", encoded)
+  set_var("waf_forward_response_bytes", #encoded)
+  set_var("waf_forward_response_sha256", sha256(encoded))
   ngx.status = status
   ngx.header.content_type = "application/json"
   ngx.header.content_length = #encoded
@@ -125,15 +137,19 @@ local function reset_request_state()
   set_var("waf_field", "-")
   set_var("waf_rule_id", "-")
   set_var("waf_request_host", "-")
+  set_var("waf_request_body", "")
   set_var("waf_request_body_bytes", 0)
   set_var("waf_request_body_sha256", "-")
+  set_var("waf_forward_body", "")
   set_var("waf_forward_body_bytes", 0)
   set_var("waf_forward_body_sha256", "-")
   set_var("waf_upstream_addr", "-")
   set_var("waf_upstream_status", "-")
   set_var("waf_response_schema", "-")
+  set_var("waf_response_body", "")
   set_var("waf_response_body_bytes", 0)
   set_var("waf_response_body_sha256", "-")
+  set_var("waf_forward_response_body", "")
   set_var("waf_forward_response_bytes", 0)
   set_var("waf_forward_response_sha256", "-")
 end
@@ -166,6 +182,17 @@ function M.access()
   local path = ngx.var.uri
   local request_uri = ngx.var.request_uri
   local headers, headers_err = ngx.req.get_headers()
+  ngx.req.read_body()
+  local request_body_file = ngx.req.get_body_file()
+  local raw_request_body = ngx.req.get_body_data()
+  if raw_request_body == nil and request_body_file ~= nil then
+    raw_request_body = read_body_file(request_body_file)
+  end
+  if raw_request_body ~= nil then
+    set_var("waf_request_body", raw_request_body)
+    set_var("waf_request_body_bytes", #raw_request_body)
+    set_var("waf_request_body_sha256", sha256(raw_request_body))
+  end
   local precheck = decision:match({
     host = host,
     method = method,
@@ -189,16 +216,13 @@ function M.access()
         action = "deny", status = 415, reason = "unsupported_media_type", rule = rule,
       })
     end
-    ngx.req.read_body()
-    local raw = ngx.req.get_body_data()
-    if raw == nil and ngx.req.get_body_file() ~= nil then
+    local raw = raw_request_body
+    if request_body_file ~= nil then
       return deny_request({
         action = "deny", status = 413, reason = "request_body_too_large", rule = rule,
       })
     end
     if raw ~= nil then
-      set_var("waf_request_body_bytes", #raw)
-      set_var("waf_request_body_sha256", sha256(raw))
       if #raw > max_request_body_bytes then
         return deny_request({
           action = "deny", status = 413, reason = "request_body_too_large", rule = rule,
@@ -226,18 +250,14 @@ function M.access()
       })
     end
     ngx.req.set_body_data(normalized)
+    set_var("waf_forward_body", normalized)
     set_var("waf_forward_body_bytes", #normalized)
     set_var("waf_forward_body_sha256", sha256(normalized))
   else
     -- 无 request_schema 的白名单接口一律不允许正文。
-    ngx.req.read_body()
-    local unexpected = ngx.req.get_body_data()
-    local unexpected_file = ngx.req.get_body_file()
+    local unexpected = raw_request_body
+    local unexpected_file = request_body_file
     if (unexpected ~= nil and #unexpected > 0) or unexpected_file ~= nil then
-      if unexpected ~= nil then
-        set_var("waf_request_body_bytes", #unexpected)
-        set_var("waf_request_body_sha256", sha256(unexpected))
-      end
       return deny_request({
         action = "deny", status = 400, reason = "unexpected_body", rule = rule,
       })
@@ -285,6 +305,7 @@ function M.proxy()
   set_var("waf_upstream_status", response.status)
 
   local raw = type(response.body) == "string" and response.body or ""
+  set_var("waf_response_body", raw)
   set_var("waf_response_body_bytes", #raw)
   set_var("waf_response_body_sha256", sha256(raw))
   if response.truncated then
@@ -350,6 +371,7 @@ function M.proxy()
     })
   end
 
+  set_var("waf_forward_response_body", normalized)
   set_var("waf_forward_response_bytes", #normalized)
   set_var("waf_forward_response_sha256", sha256(normalized))
   apply_decision({ action = "allow", rule = rule }, "allow_response")

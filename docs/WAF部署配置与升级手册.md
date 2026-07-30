@@ -34,7 +34,7 @@
 - JSON 请求体大小、字段、类型和取值范围校验；
 - 按 Host 和响应状态码选择响应 schema；
 - 在响应正文返回前检查大小、媒体类型、编码、JSON 和字段；
-- 请求、响应摘要及处置结果审计。
+- 请求、响应完整正文、摘要及处置结果审计。
 
 七层 WAF 不替代：
 
@@ -761,16 +761,22 @@ action
 reason
 request_body_bytes
 request_body_sha256
+request_body
+forward_body
 upstream_addr
 upstream_status
 response_schema
 response_body_bytes
 response_body_sha256
+response_body
+forward_response_body
 forward_response_bytes
 forward_response_sha256
 ```
 
-不得记录 query、请求正文或响应正文原文。蓝、黄日志应能通过 `trace_id` 关联，并按公司要求配置轮转、留存、转储和防篡改。
+其中 `request_body` 是收到的原始请求，`forward_body` 是规范化后发往下一跳的请求，`response_body` 是原始上游响应，`forward_response_body` 是实际返回给调用方的响应。
+
+当前实现全量裸记原始请求、规范化转发请求、原始上游响应和实际返回响应正文，不做脱敏、采样或字段过滤。蓝、黄日志应能通过 `trace_id` 关联，并按公司要求配置轮转、留存、转储和防篡改。该实现与白名单台账 `BY-002` 的原文日志禁止项冲突，属于基线偏离，不能据此判定生产放行。
 
 ## 15. 日常变更
 
@@ -827,7 +833,7 @@ forward_response_sha256
 - [ ] 规则检查为 `0 error`；
 - [ ] 两端 OpenResty `-t` 成功；
 - [ ] 正向、交叉、异常响应、超限和旁路用例通过；
-- [ ] 日志可查询、可关联且不含正文；
+- [ ] 日志可查询、可关联、包含完整请求/响应正文，且基线偏离已记录；
 - [ ] 容量、日志轮转和集中转储已确认；
 - [ ] 旧版本目录和安装包可完整回滚；
 - [ ] 变更窗口、负责人和回滚触发条件已记录。

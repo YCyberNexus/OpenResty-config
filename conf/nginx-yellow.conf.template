@@ -38,7 +38,12 @@ http {
     set $waf_trace_id $request_id;
     include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/rejected.log waf_reject;
-    return 444;
+    location / {
+      content_by_lua_block {
+        ngx.req.read_body()
+        return ngx.exit(444)
+      }
+    }
   }
 
   include waf-audit-log-format.conf;

@@ -18,7 +18,7 @@
 - 未配置 `request_schema` 的接口禁止携带请求体。
 - 不转发客户端原始请求头，只重建 Host、Content-Type、Accept 和 trace ID；Content-Length 由 Nginx 按规范化正文自动生成。
 - 上游响应在受限内存子请求中完整取得，按状态码选择响应 schema；未登记状态、非 JSON、超限或字段不合规均 fail-closed。
-- 请求、响应正文都只记录字节数与 SHA-256，不写入审计日志原文。
+- 审计日志全量记录原始请求、规范化转发请求、原始上游响应和实际返回响应正文，同时保留字节数与 SHA-256。
 - 蓝、黄节点分别写本地 JSON Lines 审计日志。
 
 WAF 不负责四层来源限制，也不替代防火墙、EDR、DLP、Jumpserver、文件外发审批或日志平台。
@@ -112,7 +112,7 @@ make test
 /data/openresty-waf/audit/rejected.log
 ```
 
-日志记录节点、来源地址、Host、method、path、rule ID、动作、拒绝原因、请求/响应体大小和 SHA-256、响应 schema、上游地址与状态；不记录 query 或正文原文。
+日志记录节点、来源地址、Host、method、path、rule ID、动作、拒绝原因、请求/响应体原文、大小和 SHA-256、响应 schema、上游地址与状态。正文不做脱敏、采样或字段过滤；该行为偏离白名单台账中“黄区原文不得写入审计日志”的控制要求，不能据此声称满足生产安全基线。
 
 ## 本地验证
 
