@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- 配置体检：检查精确 URL 白名单、请求 schema 引用和请求大小上限。
+-- 配置体检：检查精确 Host/URL 白名单、请求/响应 schema 和正文大小上限。
 --
 -- 用法（在项目根目录执行）：
 --   luajit scripts/check_rules.lua                 # 检查 conf/waf_rules.lua
@@ -54,9 +54,14 @@ if type(config) == "table" then
   for _, rule in ipairs(type(config.whitelist) == "table" and config.whitelist or {}) do
     if type(rule) == "table" then
       local methods = type(rule.methods) == "table" and table.concat(rule.methods, ",") or "-"
-      print(string.format("  ALLOW  %s  %s  [%s]  body=%s", methods,
-        tostring(rule.path or "-"), tostring(rule.id or "-"),
-        tostring(rule.request_schema or "none")))
+      local statuses = {}
+      for status in pairs(type(rule.responses) == "table" and rule.responses or {}) do
+        statuses[#statuses + 1] = tostring(status)
+      end
+      table.sort(statuses)
+      print(string.format("  ALLOW  %s  %s  %s  [%s]  request=%s  responses=%s", methods,
+        tostring(rule.host or "-"), tostring(rule.path or "-"), tostring(rule.id or "-"),
+        tostring(rule.request_schema or "none"), table.concat(statuses, ",")))
     end
   end
 end

@@ -1,4 +1,4 @@
--- 精确 method + path 白名单匹配器。
+-- 精确 host + method + path 白名单匹配器。
 local UrlFilter = {}
 UrlFilter.__index = UrlFilter
 
@@ -13,9 +13,11 @@ local function method_matches(rule, method)
   return false
 end
 
-function UrlFilter:match(method, path)
+function UrlFilter:match(host, method, path)
   for _, rule in ipairs(self.rules) do
-    if rule.path == path and method_matches(rule, method) then return rule end
+    if rule.host == host and rule.path == path and method_matches(rule, method) then
+      return rule
+    end
   end
   return nil
 end

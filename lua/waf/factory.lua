@@ -1,4 +1,4 @@
--- 把白名单和请求 schemas 构造成请求决策器。
+-- 把白名单和请求/响应 schemas 构造成决策器。
 local UrlFilter = require("waf.url_filter")
 local JsonValidator = require("waf.json_validator")
 local Decision = require("waf.decision")

@@ -4,19 +4,27 @@ local JsonValidator = require("waf.json_validator")
 local M = {}
 local KNOWN_CONFIG_KEYS = {
   max_request_body_bytes = true,
+  max_response_body_bytes = true,
   whitelist = true,
   schemas = true,
 }
 local KNOWN_WHITELIST_KEYS = {
   id = true,
+  host = true,
   methods = true,
   path = true,
   request_schema = true,
+  responses = true,
   -- 保留这些旧/不安全关键字只为给出有针对性的迁移错误，而不是静默忽略。
   pattern = true,
   allow_query = true,
   body = true,
 }
+local KNOWN_RESPONSE_KEYS = {
+  schema = true,
+  max_body_bytes = true,
+}
+local MAX_RESPONSE_BODY_BYTES = 1048576
 local KNOWN_METHODS = {
   GET = true, POST = true, PUT = true, PATCH = true, DELETE = true,
 }
@@ -63,6 +71,21 @@ end
 
 local function positive_integer(value)
   return type(value) == "number" and value > 0 and value == math.floor(value)
+end
+
+local function valid_host(value)
+  if type(value) ~= "string" or value == "" or #value > 253 or value ~= value:lower()
+    or value:find(":", 1, true) or value:find("/", 1, true)
+    or value:find("%s") or value:find("%.%.")
+    or value:sub(1, 1) == "." or value:sub(-1) == "." then
+    return false
+  end
+  for label in value:gmatch("[^.]+") do
+    if #label > 63 or not label:match("^[a-z0-9][a-z0-9-]*[a-z0-9]$") then
+      if not label:match("^[a-z0-9]$") then return false end
+    end
+  end
+  return true
 end
 
 local function type_has(schema, wanted)
@@ -284,6 +307,12 @@ function M.lint(config)
   elseif config.max_request_body_bytes > 16384 then
     add("error", "max_request_body_bytes", "不得超过 Nginx client_max_body_size 的 16384 字节")
   end
+  if not positive_integer(config.max_response_body_bytes) then
+    add("error", "max_response_body_bytes", "max_response_body_bytes 必须是大于 0 的整数")
+  elseif config.max_response_body_bytes > MAX_RESPONSE_BODY_BYTES then
+    add("error", "max_response_body_bytes",
+      "不得超过 Nginx subrequest_output_buffer_size 的 1048576 字节")
+  end
 
   if not nonempty_array(whitelist) then
     add("warn", "whitelist", "白名单为空，所有请求都会被默认拒绝")
@@ -304,9 +333,14 @@ function M.lint(config)
     else
       ids[rule.id] = true
     end
+    if not valid_host(rule.host) then
+      add("error", at .. ".host", "host 必须是不含端口、通配符和路径的小写精确主机名或 IPv4 地址")
+    end
     if type(rule.path) ~= "string" or rule.path:sub(1, 1) ~= "/"
       or rule.path:find("?", 1, true) or rule.path:find("#", 1, true) then
       add("error", at .. ".path", "白名单必须使用不含 query/fragment 的绝对精确 path")
+    elseif rule.path == "/__waf_upstream" or rule.path:sub(1, 16) == "/__waf_upstream/" then
+      add("error", at .. ".path", "该前缀保留给 WAF 内部响应校验子请求，不得登记为业务 path")
     end
     if rule.pattern ~= nil then
       add("error", at .. ".pattern", "跨区生产白名单不得使用正则 path；必须逐条精确登记")
@@ -321,9 +355,9 @@ function M.lint(config)
 
     local methods = type(rule.methods) == "table" and rule.methods or {}
     for _, method in ipairs(methods) do
-      local route_key = tostring(method) .. " " .. tostring(rule.path)
+      local route_key = tostring(rule.host) .. " " .. tostring(method) .. " " .. tostring(rule.path)
       if seen_routes[route_key] then
-        add("error", at, "method+path 重复，靠前规则会短路：" .. route_key)
+        add("error", at, "host+method+path 重复，靠前规则会短路：" .. route_key)
       else
         seen_routes[route_key] = true
       end
@@ -338,6 +372,36 @@ function M.lint(config)
       end
     end
 
+    if type(rule.responses) ~= "table" or next(rule.responses) == nil then
+      add("error", at .. ".responses", "responses 必须按 HTTP 状态码登记至少一个响应 schema")
+    else
+      for status, policy in pairs(rule.responses) do
+        local response_at = at .. ".responses[" .. tostring(status) .. "]"
+        if type(status) ~= "number" or status ~= math.floor(status)
+          or status < 100 or status > 599 then
+          add("error", response_at, "响应状态码必须是 100 到 599 的整数")
+        end
+        if type(policy) ~= "table" then
+          add("error", response_at, "响应策略必须是 table")
+        else
+          check_known_keys(policy, KNOWN_RESPONSE_KEYS, response_at, add)
+          if type(policy.schema) ~= "string" or policy.schema == "" then
+            add("error", response_at .. ".schema", "响应 schema 必须是非空名称")
+          elseif schemas[policy.schema] == nil then
+            add("error", response_at .. ".schema", "引用了不存在的 schema：" .. tostring(policy.schema))
+          else
+            referenced[policy.schema] = true
+          end
+          if not positive_integer(policy.max_body_bytes) then
+            add("error", response_at .. ".max_body_bytes", "响应体上限必须是大于 0 的整数")
+          elseif positive_integer(config.max_response_body_bytes)
+            and policy.max_body_bytes > config.max_response_body_bytes then
+            add("error", response_at .. ".max_body_bytes", "不得超过全局 max_response_body_bytes")
+          end
+        end
+      end
+    end
+
   end
 
   for name, schema in pairs(schemas) do
@@ -346,7 +410,7 @@ function M.lint(config)
     end
     check_schema(schema, "schemas." .. tostring(name), add)
     if not referenced[name] then
-      add("warn", "schemas." .. tostring(name), "schema 未被任何请求规则引用")
+      add("warn", "schemas." .. tostring(name), "schema 未被任何请求或响应规则引用")
     end
   end
 

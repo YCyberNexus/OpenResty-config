@@ -81,7 +81,7 @@ cat <<EOF
 
 2. 核对四层策略只允许已登记的源、目标 IP 和端口：蓝区业务 -> 蓝 WAF；
    蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。蓝、黄两侧 conf/waf_rules.lua
-   必须分发同一份规则文件。
+   必须分发同一份规则文件，并逐条核对 Host、请求 schema 和逐状态码响应 schema。
 
 3. 安装或更新服务单元（此时不启动）：
    install -o root -g root -m 0644 "$PREFIX/deploy/openresty-waf@.service" /etc/systemd/system/openresty-waf@.service

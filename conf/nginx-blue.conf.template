@@ -8,7 +8,7 @@ pid /run/openresty-waf/blue.pid;
 events { worker_connections 2048; }
 
 http {
-  include conf/waf-http-common.conf;
+  include waf-http-common.conf;
 
   init_by_lua_block {
     local rules = require("waf_rules")
@@ -26,42 +26,36 @@ http {
     server_name "";
     set $waf_node_role "blue";
     set $waf_trace_id $request_id;
-    include conf/waf-audit-vars.conf;
+    include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/rejected.log waf_reject;
     return 444;
   }
 
-  include conf/waf-audit-log-format.conf;
+  include waf-audit-log-format.conf;
 
   server {
     listen __BLUE_WAF_LISTEN_IP__:__BLUE_WAF_LISTEN_PORT__;
-    server_name __BLUE_WAF_HOST__;
+    # 两个服务 Host 必须与两端 waf_rules.lua 中的 rule.host 精确一致。
+    server_name __WAF_SERVICE_HOST_A__ __WAF_SERVICE_HOST_B__;
     default_type application/json;
 
     set $waf_node_role "blue";
     set $waf_trace_id $request_id;
-    include conf/waf-audit-vars.conf;
+    include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/access.log waf_audit;
     add_header X-Request-ID $waf_trace_id always;
 
     location / {
-      include conf/waf-public-location.conf;
+      include waf-public-location.conf;
+    }
 
-      # 不带 URI 的 proxy_pass 保留已经过白名单检查的原始 path。
+    # 仅 handler.proxy() 可以发起此内部子请求；前缀会在代理前剥离。
+    location ^~ /__waf_upstream/ {
+      internal;
+      rewrite ^/__waf_upstream(/.*)$ $1 break;
       proxy_pass http://yellow_waf;
-      proxy_http_version 1.1;
-      proxy_pass_request_headers off;
-      proxy_request_buffering on;
-      proxy_buffering off;
-      proxy_set_header Host __YELLOW_WAF_HOST__;
-      proxy_set_header Content-Type $waf_upstream_content_type;
-      proxy_set_header Content-Length $waf_forward_body_bytes;
-      proxy_set_header Accept application/json;
-      proxy_set_header Connection "";
-      proxy_set_header X-WAF-Trace-ID $waf_trace_id;
-      proxy_connect_timeout 5s;
-      proxy_send_timeout 30s;
-      proxy_read_timeout 60s;
+      proxy_set_header Host $host;
+      include waf-internal-proxy-common.conf;
     }
   }
 }

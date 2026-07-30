@@ -1,4 +1,4 @@
--- 请求决策链：请求头完整性 → method+path 白名单 → 查询串 → 请求 schema。
+-- 请求/响应决策链：请求头完整性 → host+method+path 白名单 → schema。
 -- 纯逻辑，不依赖 ngx。
 local Decision = {}
 Decision.__index = Decision
@@ -31,7 +31,7 @@ function Decision:match(req)
     end
   end
 
-  local rule = self.whitelist and self.whitelist:match(req.method, req.path)
+  local rule = self.whitelist and self.whitelist:match(req.host, req.method, req.path)
   if not rule then return deny(403, "not_in_whitelist") end
 
   if req.query_present or (req.args ~= nil and req.args ~= "") then
@@ -41,6 +41,32 @@ function Decision:match(req)
     return deny(400, "unexpected_body", { rule = rule })
   end
   return { action = "allow", status = 200, rule = rule }
+end
+
+function Decision:response_policy(rule, status)
+  local policy = rule and rule.responses and rule.responses[status]
+  if not policy then
+    return nil, deny(502, "response_status_not_allowed", {
+      field = tostring(status), rule = rule,
+    })
+  end
+  return policy
+end
+
+function Decision:validate_response(rule, status, body)
+  local policy, rejected = self:response_policy(rule, status)
+  if not policy then return rejected end
+  local validator = self.validators[policy.schema]
+  if not validator then
+    return deny(500, "misconfigured", { field = policy.schema, rule = rule })
+  end
+  local ok, err = validator:validate(body)
+  if not ok then
+    return deny(502, "response_body", {
+      field = err.field, message = err.message, rule = rule, policy = policy,
+    })
+  end
+  return { action = "allow", status = status, rule = rule, policy = policy }
 end
 
 function Decision:validate_request(rule, body)

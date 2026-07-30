@@ -14,6 +14,7 @@ describe("decision", function()
 
   local function request(overrides)
     local value = {
+      host = "127.0.0.1",
       method = "POST",
       path = "/ai/knowledge/search",
       headers = { ["content-type"] = "application/json" },
@@ -24,7 +25,9 @@ describe("decision", function()
     return value
   end
 
-  it("default-denies an unlisted method or path", function()
+  it("default-denies an unlisted host, method, or path", function()
+    assert.are.equal("not_in_whitelist",
+      decision:evaluate(request({ host = "other.example.internal" })).reason)
     assert.are.equal("not_in_whitelist", decision:evaluate(request({ path = "/not-listed" })).reason)
     assert.are.equal("not_in_whitelist", decision:evaluate(request({ method = "PUT" })).reason)
   end)
@@ -61,5 +64,47 @@ describe("decision", function()
     local policy_error = decision:evaluate(request({ body = { query = "q", top_k = 51 } }))
     assert.are.equal(400, schema_error.status)
     assert.are.equal(422, policy_error.status)
+  end)
+
+  it("validates an allowed response by status and schema", function()
+    local rule = decision:match(request()).rule
+    assert.are.equal("allow",
+      decision:validate_response(rule, 200, fixtures.search_response()).action)
+    assert.are.equal("response_body",
+      decision:validate_response(rule, 200, { query = "missing fields" }).reason)
+    assert.are.equal("response_status_not_allowed",
+      decision:validate_response(rule, 201, fixtures.search_response()).reason)
+  end)
+
+  it("uses different request and response schemas for the same path on different hosts", function()
+    local isolated = factory.build_decision(fixtures.same_path_config(), {
+      null_value = fixtures.json.null,
+      array_mt = fixtures.json.array_mt,
+    })
+    local a = {
+      host = "service-a.example.internal", method = "POST", path = "/ai/knowledge/search",
+      body_present = true, headers = {}, body = { query = "q" },
+    }
+    local b = {
+      host = "service-b.example.internal", method = "POST", path = "/ai/knowledge/search",
+      body_present = true, headers = {}, body = { keyword = "k", limit = 2 },
+    }
+    assert.are.equal("allow", isolated:evaluate(a).action)
+    assert.are.equal("allow", isolated:evaluate(b).action)
+    a.body = b.body
+    b.body = { query = "q" }
+    assert.are.equal("request_body", isolated:evaluate(a).reason)
+    assert.are.equal("request_body", isolated:evaluate(b).reason)
+
+    local rule_a = isolated:match(a).rule
+    local rule_b = isolated:match(b).rule
+    local response_a = { results = fixtures.json.array({ "one" }) }
+    local response_b = {
+      items = fixtures.json.array({ { id = 1, title = "one" } }), count = 1,
+    }
+    assert.are.equal("allow", isolated:validate_response(rule_a, 200, response_a).action)
+    assert.are.equal("allow", isolated:validate_response(rule_b, 200, response_b).action)
+    assert.are.equal("response_body", isolated:validate_response(rule_a, 200, response_b).reason)
+    assert.are.equal("response_body", isolated:validate_response(rule_b, 200, response_a).reason)
   end)
 end)

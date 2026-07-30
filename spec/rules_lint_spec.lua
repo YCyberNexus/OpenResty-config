@@ -27,7 +27,7 @@ describe("rules_lint", function()
     assert.are.equal(1, lint.count(issues, "warn"))
   end)
 
-  it("rejects unknown top-level and rule keys, including old response config", function()
+  it("rejects unknown top-level and obsolete response keys", function()
     local config = fixtures.config()
     config.version = "old"
     config.whitelist[1].response_schemas = { ["200"] = "old" }
@@ -42,6 +42,14 @@ describe("rules_lint", function()
     assert.is_true(has(lint.lint(config), "error", "重复"))
   end)
 
+  it("requires an exact lowercase host without a port or wildcard", function()
+    local config = fixtures.config()
+    config.whitelist[1].host = "Knowledge.EXAMPLE.internal:8080"
+    assert.is_true(has(lint.lint(config), "error", "host"))
+    config.whitelist[1].host = "*.example.internal"
+    assert.is_true(has(lint.lint(config), "error", "host"))
+  end)
+
   it("accepts only exact paths and rejects query enablement", function()
     local config = fixtures.config()
     config.whitelist[1].pattern = "^/ai/knowledge/.*$"
@@ -49,6 +57,12 @@ describe("rules_lint", function()
     local issues = lint.lint(config)
     assert.is_true(has(issues, "error", "正则"))
     assert.is_true(has(issues, "error", "query"))
+  end)
+
+  it("reserves the internal response-capture path prefix", function()
+    local config = fixtures.config()
+    config.whitelist[1].path = "/__waf_upstream/ai/knowledge/health"
+    assert.is_true(has(lint.lint(config), "error", "保留"))
   end)
 
   it("allows a bodyless rule and rejects a missing request schema reference", function()
@@ -81,12 +95,27 @@ describe("rules_lint", function()
     assert.is_true(has(issues, "error", "max_length"))
   end)
 
-  it("flags duplicate method+path routes", function()
+  it("allows the same method/path on different hosts and rejects a duplicate host route", function()
     local config = fixtures.config()
-    config.whitelist[#config.whitelist + 1] = {
-      id = "DUPLICATE",
+    local same_path = {
+      id = "OTHER-HOST",
+      host = "other.example.internal",
       methods = { "GET" },
       path = "/ai/knowledge/health",
+      responses = {
+        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+      },
+    }
+    config.whitelist[#config.whitelist + 1] = same_path
+    assert.are.equal(0, lint.count(lint.lint(config), "error"))
+    config.whitelist[#config.whitelist + 1] = {
+      id = "DUPLICATE",
+      host = "127.0.0.1",
+      methods = { "GET" },
+      path = "/ai/knowledge/health",
+      responses = {
+        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+      },
     }
     assert.is_true(has(lint.lint(config), "error", "短路"))
   end)
@@ -97,5 +126,26 @@ describe("rules_lint", function()
     assert.is_true(has(lint.lint(config), "error", "大于 0"))
     config.max_request_body_bytes = 16385
     assert.is_true(has(lint.lint(config), "error", "16384"))
+  end)
+
+  it("requires bounded, status-specific response schemas", function()
+    local config = fixtures.config()
+    config.whitelist[2].responses[200].schema = "missing"
+    config.whitelist[2].responses[201] = { schema = "knowledge_search_response", max_body_bytes = 1048577 }
+    local issues = lint.lint(config)
+    assert.is_true(has(issues, "error", "missing"))
+    assert.is_true(has(issues, "error", "max_body_bytes"))
+
+    config = fixtures.config()
+    config.whitelist[2].responses = {}
+    assert.is_true(has(lint.lint(config), "error", "responses"))
+  end)
+
+  it("caps the global response buffer at one MiB", function()
+    local config = fixtures.config()
+    config.max_response_body_bytes = 0
+    assert.is_true(has(lint.lint(config), "error", "大于 0"))
+    config.max_response_body_bytes = 1048577
+    assert.is_true(has(lint.lint(config), "error", "1048576"))
   end)
 end)

@@ -8,14 +8,16 @@
 
 用户于 2026-07-28 确认：蓝、黄两台服务器之间已通过四层网络策略限制为双方登记的 IP 和端口互访。当前阶段不使用 mTLS，也不配置证书。
 
-七层 WAF 只做：
+七层 WAF 做：
 
-- 精确 `method + path` 白名单；
+- 精确 `host + method + path` 白名单；
 - 拒绝 query string；
 - JSON 请求体大小、字段和类型过滤；
-- 请求审计。
+- 按响应状态码选择 JSON schema；
+- 在响应回传前校验大小、媒体类型、编码和字段；
+- 请求及响应摘要审计。
 
-响应由 Nginx 直接透传，不做状态码或响应体过滤。四层限制是本方案的前置条件，WAF 不替代防火墙，也不能证明四层策略已经在现网正确落地。
+上游响应通过最大 1 MiB 的内部子请求缓冲，在任何响应正文发送前完成校验。四层限制仍是本方案的前置条件，WAF 不替代防火墙，也不能证明四层策略已经在现网正确落地。
 
 ## 2. 部署前需要确认
 
@@ -23,12 +25,12 @@
 
 | 节点 | 必填信息 |
 |---|---|
-| 蓝 WAF | 监听 IP、监听端口、业务 Host |
-| 蓝 → 黄 | 黄 WAF IP、端口、Host |
-| 黄 WAF | 监听 IP、监听端口、业务 Host |
-| 黄 → 服务 | 目标服务 IP、端口、Host |
+| 蓝 WAF | 监听 IP、监听端口、两个精确服务 Host |
+| 蓝 → 黄 | 黄 WAF IP、端口；保持服务 Host |
+| 黄 WAF | 监听 IP、监听端口、两个精确服务 Host |
+| 黄 → 服务 | 目标 A/B 的 IP、端口和各自 Host |
 | 四层策略 | 源 IP、目标 IP、方向、端口、拒绝其它来源的验证记录 |
-| 七层规则 | rule ID、method、精确 path、请求字段和大小限制 |
+| 七层规则 | rule ID、Host、method、精确 path、两套请求 schema、逐状态码响应 schema 和大小限制 |
 | 运维 | 日志留存、验证用例、回滚文件和负责人 |
 
 本模板当前使用 HTTP。若以后需要恢复 TLS，应单独设计并验收，不要在模板中临时加入 `verify off` 一类配置。
@@ -40,33 +42,32 @@
 ```lua
 return {
   max_request_body_bytes = 16384,
+  max_response_body_bytes = 1048576,
   whitelist = {
     {
       id = "RULE-001",
+      host = "service-a.example.internal",
       methods = { "GET" },
       path = "/health",
-    },
-    {
-      id = "RULE-002",
-      methods = { "POST" },
-      path = "/search",
-      request_schema = "search_request",
+      responses = {
+        [200] = { schema = "health_response", max_body_bytes = 4096 },
+      },
     },
   },
   schemas = {
-    search_request = {
+    health_response = {
       type = "object",
       additional_properties = false,
-      required = { "query" },
+      required = { "status" },
       properties = {
-        query = { type = "string", min_length = 1, max_length = 1000 },
+        status = { type = "string", enum = { "ok" } },
       },
     },
   },
 }
 ```
 
-不再配置 `version`、`direction`、`example` 或 `response_schemas`。详细字段见《WAF规则配置指南》。
+两个同路径异构服务的完整结构见 `conf/waf_rules_same_path_example.lua`。示例字段不能替代真实接口文档。详细字段见《WAF规则配置指南》。
 
 检查规则：
 
@@ -91,10 +92,14 @@ vi conf/nginx-yellow.conf
 
 - `__YELLOW_WAF_LISTEN_IP__`
 - `__YELLOW_WAF_PORT__`
-- `__YELLOW_WAF_HOST__`
-- `__PROTECTED_SERVICE_IP__`
-- `__PROTECTED_SERVICE_PORT__`
-- `__PROTECTED_SERVICE_HOST__`
+- `__WAF_SERVICE_HOST_A__`
+- `__WAF_SERVICE_HOST_B__`
+- `__PROTECTED_SERVICE_A_IP__`
+- `__PROTECTED_SERVICE_A_PORT__`
+- `__PROTECTED_SERVICE_A_HOST__`
+- `__PROTECTED_SERVICE_B_IP__`
+- `__PROTECTED_SERVICE_B_PORT__`
+- `__PROTECTED_SERVICE_B_HOST__`
 
 黄端确认无占位符残留：
 
@@ -114,10 +119,10 @@ vi conf/nginx-blue.conf
 
 - `__BLUE_WAF_LISTEN_IP__`
 - `__BLUE_WAF_LISTEN_PORT__`
-- `__BLUE_WAF_HOST__`
+- `__WAF_SERVICE_HOST_A__`
+- `__WAF_SERVICE_HOST_B__`
 - `__YELLOW_WAF_IP__`
 - `__YELLOW_WAF_PORT__`
-- `__YELLOW_WAF_HOST__`
 
 蓝端确认无占位符残留：
 
@@ -297,7 +302,10 @@ sudo systemctl status openresty-waf@blue.service --no-pager
 
 | 用例 | 预期 |
 |---|---|
-| 已登记 method/path + 合法请求体 | 放行并到达目标服务 |
+| 已登记 Host/method/path + 合法请求与响应 | 放行并到达对应目标服务 |
+| 相同 path、另一个 Host 的合法契约 | 命中另一个规则和目标，不串路由 |
+| A 请求体发送到 B Host | `400/422 request_body` |
+| B 请求体发送到 A Host | `400/422 request_body` |
 | 未登记 path | `403 not_in_whitelist` |
 | 错误 method | `403 not_in_whitelist` |
 | 任意 query string | `403 query_not_allowed` |
@@ -306,10 +314,14 @@ sudo systemctl status openresty-waf@blue.service --no-pager
 | 未知字段或错误类型 | `400/422 request_body` |
 | 超过 16 KiB | `413 request_body_too_large` |
 | 无 schema 的接口携带正文 | `400 unexpected_body` |
+| 未登记响应状态码 | `502 response_status_not_allowed` |
+| 非 JSON、压缩或非法 JSON 响应 | `502` 对应响应拒绝原因 |
+| 响应字段不符合当前 Host 的 schema | `502 response_body` |
+| 响应超过规则或 1 MiB 全局上限 | `502 response_body_too_large` |
 | 非登记来源访问黄 WAF 端口 | 被四层策略拒绝 |
 | 绕过任一 WAF 访问目标服务 | 被四层策略拒绝 |
 
-响应不在 WAF 过滤范围内；应由目标服务自身测试响应正确性和敏感数据控制。
+响应 schema 只能校验已登记结构，不能自动判断字段内容是否属于 K3 数据；敏感信息返回范围仍须由业务、安全和数据分级审批。
 
 ## 9. 审计检查
 
@@ -322,8 +334,8 @@ tail -f /data/openresty-waf/audit/rejected.log
 
 - 节点角色、来源地址、Host、method、path；
 - rule ID、allow/deny、拒绝原因；
-- 请求体大小与 SHA-256；
-- 上游地址、上游状态和请求耗时。
+- 请求体、原始响应和规范化响应的大小与 SHA-256；
+- 响应 schema、上游地址、上游状态和请求耗时。
 
 日志不得包含 query、请求正文或响应正文原文。仍需按公司要求配置日志轮转、留存和转储。
 
@@ -358,12 +370,15 @@ conf/nginx-yellow.conf
 
 | 现象 | 检查项 |
 |---|---|
-| 规则检查失败 | 未知字段、重复 method/path、schema 引用或大小配置 |
-| 所有请求 403 | 活动白名单是否为空，method/path 是否完全一致 |
+| 规则检查失败 | Host 非法、重复 host/method/path、请求/响应 schema 引用或大小配置 |
+| 所有请求 403 | 活动白名单是否为空，Host/method/path 是否完全一致 |
 | Host 请求被 444 | 请求 Host 是否与节点模板的 `server_name` 一致 |
 | 请求体 400/422 | Content-Type、JSON、required、类型、未知字段和限制 |
-| 蓝端 502/504 | 蓝到黄的四层规则、黄端监听、Host 和服务状态 |
-| 黄端 502/504 | 黄端到目标服务的地址、端口和服务状态 |
+| `response_status_not_allowed` | 实际上游状态码是否已逐条登记 |
+| `response_body` | 当前 Host/状态码关联的响应 schema 是否与上游契约一致 |
+| `response_body_too_large` | 规则上限、1 MiB 技术上限及上游异常输出 |
+| 蓝端 502 | 蓝到黄四层规则、黄端监听、Host、黄端响应校验和服务状态 |
+| 黄端 502 | 黄端到目标地址、端口、响应 Content-Type/schema 和服务状态 |
 | 审计无记录 | 目录权限、access_log 配置和 systemd 沙箱路径 |
 
 ## 13. 上线检查表
@@ -371,8 +386,9 @@ conf/nginx-yellow.conf
 - [ ] 四层源 IP、目标 IP、方向和端口已核对。
 - [ ] 非登记来源及绕过路径实测失败。
 - [ ] 蓝、黄节点使用同一份规则文件。
+- [ ] 两个服务 Host、两套请求 schema 和逐状态码响应 schema 已审批。
 - [ ] 规则检查为 `0 error`。
 - [ ] 两端 OpenResty 配置检查通过。
-- [ ] 正向、拒绝、请求体和旁路用例通过。
+- [ ] 正向、交叉请求、交叉响应、超限和旁路用例通过。
 - [ ] 审计日志可查询且不含正文原文。
 - [ ] 上一版规则和节点配置可回滚。

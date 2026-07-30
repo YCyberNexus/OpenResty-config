@@ -1,4 +1,4 @@
-# 黄区 WAF 生产模板：蓝 WAF -> HTTP -> 黄 WAF -> 黄区目标服务。
+# 黄区 WAF 双目标生产模板：蓝 WAF -> HTTP -> 黄 WAF -> 两个固定黄区服务。
 # 来源身份由现有四层网络策略限定；本模板不配置 TLS 或客户端证书。
 user nobody;
 worker_processes auto;
@@ -8,7 +8,7 @@ pid /run/openresty-waf/yellow.pid;
 events { worker_connections 2048; }
 
 http {
-  include conf/waf-http-common.conf;
+  include waf-http-common.conf;
 
   map $http_x_waf_trace_id $waf_peer_trace_id {
     "" $request_id;
@@ -20,8 +20,13 @@ http {
     require("waf.handler").init(rules)
   }
 
-  upstream protected_backend {
-    server __PROTECTED_SERVICE_IP__:__PROTECTED_SERVICE_PORT__;
+  upstream protected_backend_a {
+    server __PROTECTED_SERVICE_A_IP__:__PROTECTED_SERVICE_A_PORT__;
+    keepalive 32;
+  }
+
+  upstream protected_backend_b {
+    server __PROTECTED_SERVICE_B_IP__:__PROTECTED_SERVICE_B_PORT__;
     keepalive 32;
   }
 
@@ -31,41 +36,58 @@ http {
     server_name "";
     set $waf_node_role "yellow";
     set $waf_trace_id $request_id;
-    include conf/waf-audit-vars.conf;
+    include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/rejected.log waf_reject;
     return 444;
   }
 
-  include conf/waf-audit-log-format.conf;
+  include waf-audit-log-format.conf;
 
   server {
     listen __YELLOW_WAF_LISTEN_IP__:__YELLOW_WAF_PORT__;
-    server_name __YELLOW_WAF_HOST__;
+    server_name __WAF_SERVICE_HOST_A__;
     default_type application/json;
 
     set $waf_node_role "yellow";
     set $waf_trace_id $waf_peer_trace_id;
-    include conf/waf-audit-vars.conf;
+    include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/access.log waf_audit;
     add_header X-Request-ID $waf_trace_id always;
 
     location / {
-      include conf/waf-public-location.conf;
+      include waf-public-location.conf;
+    }
 
-      proxy_pass http://protected_backend;
-      proxy_http_version 1.1;
-      proxy_pass_request_headers off;
-      proxy_request_buffering on;
-      proxy_buffering off;
-      proxy_set_header Host __PROTECTED_SERVICE_HOST__;
-      proxy_set_header Content-Type $waf_upstream_content_type;
-      proxy_set_header Content-Length $waf_forward_body_bytes;
-      proxy_set_header Accept application/json;
-      proxy_set_header Connection "";
-      proxy_set_header X-WAF-Trace-ID $waf_trace_id;
-      proxy_connect_timeout 5s;
-      proxy_send_timeout 30s;
-      proxy_read_timeout 60s;
+    location ^~ /__waf_upstream/ {
+      internal;
+      rewrite ^/__waf_upstream(/.*)$ $1 break;
+      proxy_pass http://protected_backend_a;
+      proxy_set_header Host __PROTECTED_SERVICE_A_HOST__;
+      include waf-internal-proxy-common.conf;
+    }
+  }
+
+  server {
+    listen __YELLOW_WAF_LISTEN_IP__:__YELLOW_WAF_PORT__;
+    server_name __WAF_SERVICE_HOST_B__;
+    default_type application/json;
+
+    set $waf_node_role "yellow";
+    set $waf_trace_id $waf_peer_trace_id;
+    include waf-audit-vars.conf;
+    access_log /data/openresty-waf/audit/access.log waf_audit;
+    add_header X-Request-ID $waf_trace_id always;
+
+    location / {
+      include waf-public-location.conf;
+    }
+
+    location ^~ /__waf_upstream/ {
+      internal;
+      rewrite ^/__waf_upstream(/.*)$ $1 break;
+      proxy_pass http://protected_backend_b;
+      proxy_set_header Host __PROTECTED_SERVICE_B_HOST__;
+      include waf-internal-proxy-common.conf;
     }
   }
 }

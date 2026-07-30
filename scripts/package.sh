@@ -23,8 +23,10 @@ FILES=(
   conf/waf-audit-log-format.conf
   conf/waf-audit-vars.conf
   conf/waf-public-location.conf
+  conf/waf-internal-proxy-common.conf
   conf/waf_rules.lua
   conf/waf_rules_knowledge_example.lua
+  conf/waf_rules_same_path_example.lua
   lua/waf/url_filter.lua
   lua/waf/json_validator.lua
   lua/waf/decision.lua
@@ -40,6 +42,7 @@ FILES=(
   docs/WAF规则配置指南.md
   docs/绿蓝黄数据链路白名单台账.md
   docs/知识库接口文档.md
+  docs/多黄区目标同路径接口WAF配置与上线手册.md
 )
 
 TMP="$(mktemp -d)"

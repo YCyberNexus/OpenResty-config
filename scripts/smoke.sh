@@ -38,4 +38,16 @@ check "method override header is ignored and not forwarded" 200 \
   -X POST "$BASE/ai/knowledge/search" -H 'Content-Type: application/json' \
   -H 'X-HTTP-Method-Override: GET' -d '{"query":"q"}'
 
+response="$(curl -sS -w $'\n%{http_code}' \
+  -X POST "$BASE/ai/knowledge/search" -H 'Content-Type: application/json' \
+  -d '{"query":"__waf_test_invalid_response__"}')"
+code="${response##*$'\n'}"
+body="${response%$'\n'*}"
+if [[ "$code" == "502" && "$body" != *"upstream-must-not-leak"* ]]; then
+  printf '  ✓ %-48s -> %s\n' "invalid upstream response: deny without body leak" "$code"
+else
+  printf '  ✗ %-48s -> %s\n' "invalid upstream response: deny without body leak" "$code"
+  fail=1
+fi
+
 exit "$fail"
