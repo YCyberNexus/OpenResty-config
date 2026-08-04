@@ -7,13 +7,15 @@
 | 文件 | 用途 | 是否需要修改 |
 |---|---|---|
 | `conf/waf_rules.lua` | 业务 Host、接口、请求和响应 schema | 必须按实际接口修改 |
-| `conf/nginx-blue.conf.template` | 蓝 WAF 配置模板 | 复制为 `.conf` 后替换占位符 |
-| `conf/nginx-yellow.conf.template` | 黄 WAF 配置模板 | 复制为 `.conf` 后替换占位符 |
+| `conf/nginx-blue.conf` | 蓝 WAF 固定生产配置 | 当前现场不修改 |
+| `conf/nginx-yellow.conf` | 黄 WAF 固定生产配置 | 当前现场不修改 |
+| `conf/nginx-*.conf.template` | 迁移到其它地址时使用的通用模板 | 当前部署不使用 |
 | `conf/waf-http-common.conf` | 请求大小、响应缓冲和默认拒绝日志 | 通常不修改 |
 | `conf/waf-audit-log-format.conf` | 业务审计日志字段 | 通常不修改 |
 | `conf/waf-audit-vars.conf` | Lua 可写审计变量 | 不修改 |
 | `conf/waf-internal-proxy-common.conf` | 固定 upstream 的请求头和超时 | 确认超时即可 |
 | `deploy/openresty-waf@.service` | 蓝、黄 systemd 服务模板 | 通常不修改 |
+| `docs/BY-002图谱增强检索运维配置说明.md` | BY-002 五接口现场变更、检查、验收和回滚步骤 | 转交运维执行 |
 
 服务器最终生效的文件是：
 
@@ -27,6 +29,19 @@
 
 蓝、黄节点必须使用同一个部署包和内容完全一致的 `waf_rules.lua`。
 
+2026-07-31 已把现场 Nginx 值固化到仓库和部署包：
+
+```text
+蓝 WAF：10.64.5.4:80
+黄 WAF：10.64.9.2:80
+业务 Host：kb.pxsemic.tech、kb-1.pxsemic.tech
+黄区固定后端：192.168.14.249:6789
+后端 Host：两个入口都发送 kb.pxsemic.tech
+```
+
+`kb-1.pxsemic.tech` 当前是同一后端的入口别名。只有在地址、端口、业务 Host 或后端要求的
+Host 经审批发生变化时，才修改固定 `.conf`；不要在每次安装或升级时重新从模板生成。
+
 ## 2. 需要准备的配置值
 
 配置前收集以下值，不明确的值不要猜测：
@@ -38,7 +53,7 @@
 | 黄 WAF 监听 IP/端口 | 蓝 WAF 连接黄 WAF 的地址 |
 | 后端 A/B 的 IP/端口 | 黄 WAF 固定连接的两个目标服务 |
 | 后端 A/B 要求的 Host | 黄 WAF 发给后端的 HTTP Host |
-| method/path | 每个接口的精确 HTTP 方法和路径 |
+| method/path | 每个接口的 HTTP 方法和精确路径；资产接口可使用末尾 UUID 受限模板 |
 | 请求字段 | 字段名、类型、是否必填、长度或数值范围 |
 | 响应状态码和字段 | 每个允许状态码都要配置独立响应 schema |
 | 大小限制 | 请求体上限及每个状态码的响应体上限 |
@@ -49,6 +64,9 @@
 host + method + path
 ```
 
+除精确 path 外，当前仅支持一个受限例外：末尾路径段为 `{uuid}`，例如
+`/ai/knowledge/assets/{uuid}`。它只匹配规范 UUID，不是正则或任意前缀放行。
+
 两个服务使用相同 method/path 时，必须使用不同 Host。例如：
 
 ```text
@@ -58,13 +76,13 @@ service-b.example.internal + POST + /ai/knowledge/search → 后端 B
 
 ## 3. 配置 `waf_rules.lua`
 
-### 3.1 顶层配置
+### 3.1 顶层配置与当前活动规则
 
-活动规则文件默认内容：
+下面是用于说明顶层结构的最小拒绝配置；`whitelist` 为空时所有业务接口都会被拒绝：
 
 ```lua
 return {
-  max_request_body_bytes = 16384,
+  max_request_body_bytes = 131072,
   max_response_body_bytes = 1048576,
 
   whitelist = {},
@@ -72,9 +90,24 @@ return {
 }
 ```
 
+仓库当前实际的 `conf/waf_rules.lua` 登记五条规则：
+
+```text
+BY-002-KB-SEARCH          POST kb.pxsemic.tech   /ai/knowledge/search
+BY-002-KB-ASSET           GET  kb.pxsemic.tech   /ai/knowledge/assets/{uuid}
+BY-002-KB-HEALTH          GET  kb.pxsemic.tech   /ai/knowledge/health
+BY-002-KB-GRAPH-QUERY     POST kb.pxsemic.tech   /ai/knowledge/graph/query
+BY-002-KB-GRAPH-HEALTH    GET  kb.pxsemic.tech   /ai/knowledge/graph/health
+```
+
+检索接口要求 `query` 必填，只接受 `query`、`top_k`；图谱查询单独走
+`/ai/knowledge/graph/query`。资产详情路径只允许一个规范 UUID。源文档未登记四个新增接口
+的错误状态码，因此当前只允许其 `200` 响应；检索接口继续允许 `200`、`422`、`502`、
+`503`。Nginx 中存在的 `kb-1.pxsemic.tech` 不在活动白名单内，请求会被七层规则拒绝。
+
 | 字段 | 说明 |
 |---|---|
-| `max_request_body_bytes` | 全局请求体上限，必须大于 0，最大 16384 字节 |
+| `max_request_body_bytes` | 全局请求体上限，必须大于 0，最大 131072 字节 |
 | `max_response_body_bytes` | 全局响应体上限，必须大于 0，最大 1048576 字节 |
 | `whitelist` | 接口白名单数组；空数组会拒绝所有业务接口 |
 | `schemas` | 请求和响应 schema 字典，名称由规则引用 |
@@ -85,7 +118,7 @@ return {
 - 有请求体的接口只接受 `application/json`；
 - 未配置 `request_schema` 的接口禁止请求体；
 - 响应只接受 JSON，gzip、SSE、流式和二进制响应不支持；
-- 未登记的 Host、method、path、字段或响应状态码均拒绝。
+- 未登记的 Host、method、path、非 UUID 资产参数、字段或响应状态码均拒绝。
 
 ### 3.2 白名单规则
 
@@ -126,6 +159,7 @@ POST 接口示例：
 | `host` | 小写精确 Host，不含端口、路径、通配符或正则 |
 | `methods` | 大写 HTTP 方法数组，例如 `{ "GET" }`、`{ "POST" }` |
 | `path` | 以 `/` 开头的精确路径，不含 query 或 fragment |
+| `path_template` | 与 `path` 二选一；仅支持以独立 `{uuid}` 路径段结尾，例如 `/ai/knowledge/assets/{uuid}` |
 | `request_schema` | 有请求体时必填；无请求体接口不要填写 |
 | `responses` | 必填；每个允许状态码配置 schema 和 `max_body_bytes` |
 
@@ -160,7 +194,9 @@ service_a_request = {
 
 - `required` 中的字段必须出现；
 - 未写入 `required` 的字段可以省略，WAF 不会自动补默认值；
-- `additional_properties = false` 必须配置，未登记字段会被拒绝；
+- object 必须显式配置 `additional_properties`；通常使用 `false` 拒绝未登记字段。
+  当前五处文档明确的动态对象使用 `true`：检索 metadata、资产 raw document metadata、
+  图谱请求/响应 parameters 和图谱 rows；规则检查会逐项报告安全偏离 warning；
 - `max_length` 按 UTF-8 字符数检查；
 - `max_bytes` 按正文中的实际字节数检查；
 - `non_blank = true` 拒绝空字符串和全空白字符串；
@@ -210,7 +246,7 @@ service_a_error_response = {
 | 类型 | 可用配置 |
 |---|---|
 | 通用 | `type`、`enum` |
-| object | `required`、`properties`、`additional_properties=false`、`max_properties` |
+| object | `required`、`properties`、`additional_properties`、`max_properties` |
 | array | `items`、`min_items`、`max_items` |
 | string | `min_length`、`max_length`、`max_bytes`、`non_blank`、`trimmed`、`prefix`、`format` |
 | integer/number | `minimum`、`maximum` |
@@ -250,20 +286,16 @@ sha256sum conf/waf_rules.lua
 要求：
 
 - 规则检查为 `0 error`；
-- 正式环境不能保留空白名单 warning；
+- 当前正式规则必须输出 `0 error, 5 warning`；warning 分别来自检索 metadata、资产
+  raw document metadata、图谱请求/响应 parameters 和图谱 rows 的动态对象；同时列出
+  五条 BY-002 规则；
 - 蓝、黄节点的 `waf_rules.lua` SHA-256 一致。
 
 ## 4. 配置蓝 WAF
 
-生成正式配置：
+部署包已携带 `conf/nginx-blue.conf`，无需复制模板或重新填写现场值。
 
-```bash
-cd /opt/openresty-waf
-sudo cp conf/nginx-blue.conf.template conf/nginx-blue.conf
-sudo vi conf/nginx-blue.conf
-```
-
-替换以下占位符：
+固定配置与通用模板占位符的对应关系如下，仅在审批后的现场值发生变化时使用：
 
 | 占位符 | 填写内容 |
 |---|---|
@@ -291,15 +323,9 @@ yellow_waf = 黄 WAF 固定 IP:端口
 
 ## 5. 配置黄 WAF
 
-生成正式配置：
+部署包已携带 `conf/nginx-yellow.conf`，无需复制模板或重新填写现场值。
 
-```bash
-cd /opt/openresty-waf
-sudo cp conf/nginx-yellow.conf.template conf/nginx-yellow.conf
-sudo vi conf/nginx-yellow.conf
-```
-
-替换以下占位符：
+固定配置与通用模板占位符的对应关系如下，仅在审批后的现场值发生变化时使用：
 
 | 占位符 | 填写内容 |
 |---|---|
@@ -331,8 +357,8 @@ sudo vi conf/nginx-yellow.conf
 
 | 配置 | 当前值 | 说明 |
 |---|---:|---|
-| `client_body_buffer_size` | `16k` | 请求体内存缓冲 |
-| `client_max_body_size` | `16k` | Nginx 请求体硬上限 |
+| `client_body_buffer_size` | `128k` | 请求体内存缓冲，容纳最长 20000 字符的 Cypher |
+| `client_max_body_size` | `128k` | Nginx 请求体硬上限 |
 | `subrequest_output_buffer_size` | `1m` | 上游响应完整捕获硬上限 |
 | `underscores_in_headers` | `off` | 不接受带下划线的请求头名称 |
 | `merge_slashes` | `on` | 合并重复路径斜杠 |
@@ -432,6 +458,8 @@ tar -tzf openresty-waf.tgz
 部署包必须包含：
 
 ```text
+openresty-waf/conf/nginx-blue.conf
+openresty-waf/conf/nginx-yellow.conf
 openresty-waf/conf/nginx-blue.conf.template
 openresty-waf/conf/nginx-yellow.conf.template
 openresty-waf/conf/waf_rules.lua
@@ -441,6 +469,7 @@ openresty-waf/lua/waf/handler.lua
 openresty-waf/scripts/server-setup.sh
 openresty-waf/deploy/openresty-waf@.service
 openresty-waf/docs/WAF部署配置与升级手册.md
+openresty-waf/docs/BY-002图谱增强检索运维配置说明.md
 ```
 
 交付时记录包名和 SHA-256，蓝、黄节点使用同一个包。服务器收到后执行：
@@ -461,25 +490,11 @@ sudo tar -xzf /tmp/openresty-waf.tgz -C /opt
 cd /opt/openresty-waf
 ```
 
-### 9.2 生成节点配置
+### 9.2 核对节点配置
 
-黄节点：
-
-```bash
-sudo cp conf/nginx-yellow.conf.template conf/nginx-yellow.conf
-sudo vi conf/nginx-yellow.conf
-sudo vi conf/waf_rules.lua
-```
-
-蓝节点：
-
-```bash
-sudo cp conf/nginx-blue.conf.template conf/nginx-blue.conf
-sudo vi conf/nginx-blue.conf
-sudo vi conf/waf_rules.lua
-```
-
-两端 `waf_rules.lua` 必须一致，且不能保留包内默认空白名单。
+部署包已经携带固定的 `nginx-blue.conf` 和 `nginx-yellow.conf`，不要再从模板复制或手工填写。
+上线前只需核对文件中的固定值仍与已审批现场一致，并确认包内正式 `waf_rules.lua` 未被
+现场旧文件覆盖。两端 `waf_rules.lua` 必须一致，且应列出五条 BY-002 知识库接口规则。
 
 ### 9.3 创建目录并检查配置
 
@@ -544,10 +559,9 @@ sudo tar -xzf "$WAF_PACKAGE" --strip-components=1 -C "$WAF_RELEASE_DIR"
 
 在新目录中：
 
-1. 从新模板生成本节点 `.conf`；
-2. 填写第 4、5 节的全部占位符；
-3. 写入正式 `waf_rules.lua`；
-4. 不要把旧版 Nginx 配置整体覆盖到新目录。
+1. 核对部署包自带的本节点固定 `.conf` 与已审批现场值一致；
+2. 写入正式 `waf_rules.lua`；
+3. 不要把旧版 Nginx 配置整体覆盖到新目录。
 
 预检：
 
@@ -711,11 +725,11 @@ sudo journalctl -u openresty-waf@blue -n 100 --no-pager
 - [ ] 蓝、黄使用同一个部署包；
 - [ ] 蓝、黄 `waf_rules.lua` SHA-256 一致；
 - [ ] 所有 Nginx 占位符已替换；
-- [ ] 正式规则不是空白名单；
+- [ ] 正式规则包含五条 BY-002 知识库接口规则；
 - [ ] 规则检查为 `0 error`；
 - [ ] 两端 OpenResty `-t` 成功；
 - [ ] Host A/B 分别只到达对应后端；
-- [ ] 未登记 Host、path、字段和状态码均被拒绝；
+- [ ] 未登记 Host、path、非 UUID 资产路径、字段和状态码均被拒绝；
 - [ ] 四个正文日志字段均有实际内容；
 - [ ] 日志轮转、容量和留存已配置；
 - [ ] 回滚目录和旧包可用。

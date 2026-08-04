@@ -60,7 +60,8 @@ if type(config) == "table" then
       end
       table.sort(statuses)
       print(string.format("  ALLOW  %s  %s  %s  [%s]  request=%s  responses=%s", methods,
-        tostring(rule.host or "-"), tostring(rule.path or "-"), tostring(rule.id or "-"),
+        tostring(rule.host or "-"), tostring(rule.path or rule.path_template or "-"),
+        tostring(rule.id or "-"),
         tostring(rule.request_schema or "none"), table.concat(statuses, ",")))
     end
   end

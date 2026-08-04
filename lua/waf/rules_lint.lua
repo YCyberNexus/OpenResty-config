@@ -1,5 +1,6 @@
 -- 运维规则静态体检：补足 openresty -t 无法发现的 schema 引用、URL 冲突和 fail-open 风险。
 local JsonValidator = require("waf.json_validator")
+local UrlFilter = require("waf.url_filter")
 
 local M = {}
 local KNOWN_CONFIG_KEYS = {
@@ -13,6 +14,7 @@ local KNOWN_WHITELIST_KEYS = {
   host = true,
   methods = true,
   path = true,
+  path_template = true,
   request_schema = true,
   responses = true,
   -- 保留这些旧/不安全关键字只为给出有针对性的迁移错误，而不是静默忽略。
@@ -24,6 +26,7 @@ local KNOWN_RESPONSE_KEYS = {
   schema = true,
   max_body_bytes = true,
 }
+local MAX_REQUEST_BODY_BYTES = 131072
 local MAX_RESPONSE_BODY_BYTES = 1048576
 local KNOWN_METHODS = {
   GET = true, POST = true, PUT = true, PATCH = true, DELETE = true,
@@ -161,8 +164,12 @@ local function check_schema(schema, at, add)
     if type(schema.properties) ~= "table" then
       add("error", at .. ".properties", "object 必须显式配置 properties")
     end
-    if schema.additional_properties ~= false then
-      add("error", at .. ".additional_properties", "object 必须 additional_properties=false，未知字段不得放行")
+    if schema.additional_properties ~= false and schema.additional_properties ~= true then
+      add("error", at .. ".additional_properties",
+        "object 必须显式配置 additional_properties=false 或 true")
+    elseif schema.additional_properties == true then
+      add("warn", at .. ".additional_properties",
+        "该 object 显式放行任意未登记字段；必须记录业务确认与安全偏离")
     end
     if schema.max_properties ~= nil and (type(schema.max_properties) ~= "number"
       or schema.max_properties < 0 or schema.max_properties ~= math.floor(schema.max_properties)) then
@@ -304,8 +311,8 @@ function M.lint(config)
   end
   if not positive_integer(config.max_request_body_bytes) then
     add("error", "max_request_body_bytes", "max_request_body_bytes 必须是大于 0 的整数")
-  elseif config.max_request_body_bytes > 16384 then
-    add("error", "max_request_body_bytes", "不得超过 Nginx client_max_body_size 的 16384 字节")
+  elseif config.max_request_body_bytes > MAX_REQUEST_BODY_BYTES then
+    add("error", "max_request_body_bytes", "不得超过 Nginx client_max_body_size 的 131072 字节")
   end
   if not positive_integer(config.max_response_body_bytes) then
     add("error", "max_response_body_bytes", "max_response_body_bytes 必须是大于 0 的整数")
@@ -336,11 +343,24 @@ function M.lint(config)
     if not valid_host(rule.host) then
       add("error", at .. ".host", "host 必须是不含端口、通配符和路径的小写精确主机名或 IPv4 地址")
     end
-    if type(rule.path) ~= "string" or rule.path:sub(1, 1) ~= "/"
-      or rule.path:find("?", 1, true) or rule.path:find("#", 1, true) then
-      add("error", at .. ".path", "白名单必须使用不含 query/fragment 的绝对精确 path")
-    elseif rule.path == "/__waf_upstream" or rule.path:sub(1, 16) == "/__waf_upstream/" then
-      add("error", at .. ".path", "该前缀保留给 WAF 内部响应校验子请求，不得登记为业务 path")
+    if (rule.path == nil) == (rule.path_template == nil) then
+      add("error", at .. ".path", "必须且只能配置 path 或 path_template 其中一个")
+    elseif rule.path ~= nil then
+      if type(rule.path) ~= "string" or rule.path:sub(1, 1) ~= "/"
+        or rule.path:find("?", 1, true) or rule.path:find("#", 1, true) then
+        add("error", at .. ".path", "path 必须是不含 query/fragment 的绝对精确路径")
+      elseif rule.path == "/__waf_upstream" or rule.path:sub(1, 16) == "/__waf_upstream/" then
+        add("error", at .. ".path", "该前缀保留给 WAF 内部响应校验子请求，不得登记为业务 path")
+      end
+    else
+      local prefix = UrlFilter.path_template_prefix(rule.path_template)
+      if not prefix then
+        add("error", at .. ".path_template",
+          "path_template 只支持以独立 {uuid} 路径段结尾的绝对路径")
+      elseif prefix == "/__waf_upstream/" or prefix:sub(1, 16) == "/__waf_upstream/" then
+        add("error", at .. ".path_template",
+          "该前缀保留给 WAF 内部响应校验子请求，不得登记为业务 path")
+      end
     end
     if rule.pattern ~= nil then
       add("error", at .. ".pattern", "跨区生产白名单不得使用正则 path；必须逐条精确登记")
@@ -355,12 +375,16 @@ function M.lint(config)
 
     local methods = type(rule.methods) == "table" and rule.methods or {}
     for _, method in ipairs(methods) do
-      local route_key = tostring(rule.host) .. " " .. tostring(method) .. " " .. tostring(rule.path)
-      if seen_routes[route_key] then
-        add("error", at, "host+method+path 重复，靠前规则会短路：" .. route_key)
-      else
-        seen_routes[route_key] = true
+      for _, seen in ipairs(seen_routes) do
+        if seen.host == rule.host and seen.method == method
+          and UrlFilter.paths_overlap(seen.rule, rule) then
+          local route = tostring(rule.path or rule.path_template)
+          add("error", at, "host+method+path 重复或重叠，靠前规则会短路："
+            .. tostring(rule.host) .. " " .. tostring(method) .. " " .. route)
+          break
+        end
       end
+      seen_routes[#seen_routes + 1] = { host = rule.host, method = method, rule = rule }
     end
     if rule.request_schema ~= nil then
       if type(rule.request_schema) ~= "string" or rule.request_schema == "" then

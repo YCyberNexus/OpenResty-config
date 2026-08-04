@@ -181,6 +181,7 @@ function M.access()
   local method = ngx.req.get_method()
   local path = ngx.var.uri
   local request_uri = ngx.var.request_uri
+  local raw_path = type(request_uri) == "string" and request_uri:match("^([^?]*)") or nil
   local headers, headers_err = ngx.req.get_headers()
   ngx.req.read_body()
   local request_body_file = ngx.req.get_body_file()
@@ -197,6 +198,7 @@ function M.access()
     host = host,
     method = method,
     path = path,
+    raw_path = raw_path,
     args = ngx.var.args,
     query_present = ngx.var.is_args == "?"
       or (type(request_uri) == "string" and request_uri:find("?", 1, true) ~= nil),

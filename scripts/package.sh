@@ -17,6 +17,8 @@ OUT="${1:-$ROOT/openresty-waf-simplify.tgz}"
 # 运行期 + 部署需要随包带上的文件(logs/ 不带,在服务器上现建)
 FILES=(
   conf/nginx.conf
+  conf/nginx-blue.conf
+  conf/nginx-yellow.conf
   conf/nginx-blue.conf.template
   conf/nginx-yellow.conf.template
   conf/waf-http-common.conf
@@ -38,6 +40,7 @@ FILES=(
   scripts/check_rules.lua
   deploy/openresty-waf@.service
   docs/WAF部署配置与升级手册.md
+  docs/BY-002图谱增强检索运维配置说明.md
   docs/architecture/数据安全策略图-整改目标.png
   docs/绿蓝黄数据链路白名单台账.md
   docs/知识库接口文档.md

@@ -10,10 +10,12 @@
 
 ## 当前能力
 
-- 只允许 `conf/waf_rules.lua` 中精确登记的 `host + method + path`；相同 path 可按 Host 绑定不同契约。
+- 只允许 `conf/waf_rules.lua` 中登记的 `host + method + path`；普通接口使用精确 path，
+  资产详情接口只额外支持末尾 `{uuid}` 的受限路径模板，不接受任意正则。
 - 所有 query string 默认拒绝。
 - 配置 `request_schema` 的接口只接受 `application/json`，并校验字段、类型、长度、数量和数值范围。
-- object schema 必须设置 `additional_properties=false`，未知字段默认拒绝。
+- object schema 默认设置 `additional_properties=false`，未知字段拒绝；接口文档明确为
+  动态对象的 metadata、Cypher parameters 和图谱 rows 设置为 `true`，静态检查会逐项告警。
 - 校验通过后重新编码 JSON，再向下一跳转发。
 - 未配置 `request_schema` 的接口禁止携带请求体。
 - 不转发客户端原始请求头，只重建 Host、Content-Type、Accept 和 trace ID；Content-Length 由 Nginx 按规范化正文自动生成。
@@ -29,7 +31,7 @@ WAF 不负责四层来源限制，也不替代防火墙、EDR、DLP、Jumpserver
 
 ```lua
 return {
-  max_request_body_bytes = 16384,
+  max_request_body_bytes = 131072,
   max_response_body_bytes = 1048576,
   whitelist = {
     {
@@ -81,7 +83,19 @@ return {
 }
 ```
 
-仓库默认 `whitelist = {}`，所以安装后不会自动放行任何业务接口。知识库规则只保存在 `conf/waf_rules_knowledge_example.lua`，供本地测试参考，不会被生产模板加载。
+当前活动规则在 `kb.pxsemic.tech` 放行以下五个接口：
+
+```text
+POST /ai/knowledge/search
+GET  /ai/knowledge/assets/{uuid}
+GET  /ai/knowledge/health
+POST /ai/knowledge/graph/query
+GET  /ai/knowledge/graph/health
+```
+
+`kb-1.pxsemic.tech`、其它 method/path、query string、非 UUID 资产路径和未知顶层 JSON 字段
+继续默认拒绝。旧的本地请求示例保存在 `conf/waf_rules_knowledge_example.lua`，不参与生产加载。
+图谱查询为支持最长 20000 个 UTF-8 字符，请求 JSON 硬上限为 128 KiB；响应硬上限仍为 1 MiB。
 
 不再要求 `version`、`direction` 或 `example`。每条接口必须登记 Host 和至少一个状态码响应 schema。旧的 `--production` 参数仍可使用，但与普通检查完全相同：
 
@@ -93,12 +107,14 @@ make test
 
 ## 部署配置
 
-分别从以下模板生成蓝、黄节点配置：
+仓库已经包含按 2026-07-31 现场值固化的蓝、黄节点配置，部署包会直接携带：
 
-- `conf/nginx-blue.conf.template`
-- `conf/nginx-yellow.conf.template`（双固定目标模板）
+- `conf/nginx-blue.conf`
+- `conf/nginx-yellow.conf`（双固定路由）
 
-必须替换模板中的监听 IP/端口、Host、对端 IP/端口和黄区目标服务 IP/端口。模板使用普通 HTTP，不需要证书文件。
+当前固定链路为 `10.64.5.4:80 → 10.64.9.2:80 → 192.168.14.249:6789`，业务 Host 为
+`kb.pxsemic.tech` 和 `kb-1.pxsemic.tech`；后者在黄端作为入口别名，发往后端时使用
+`Host: kb.pxsemic.tech`。`.template` 文件仅用于以后经审批迁移到其它地址，不参与当前部署。
 
 蓝、黄两侧应分发同一份 `conf/waf_rules.lua`。启动顺序为黄端先、蓝端后。
 
@@ -132,10 +148,12 @@ make stop
 ## 核心文件
 
 ```text
-conf/waf_rules.lua                    活动白名单，默认全拒绝
+conf/waf_rules.lua                    活动白名单，放行 BY-002 五个知识库接口
 conf/waf_rules_knowledge_example.lua  本地请求过滤示例
 lua/waf/decision.lua                  Host/URL、请求与响应决策
 lua/waf/json_validator.lua            JSON 请求/响应体校验
 lua/waf/handler.lua                   OpenResty 请求校验、内部代理和响应校验
-conf/nginx-*.conf.template            蓝、黄节点双目标 HTTP 模板
+conf/nginx-blue.conf                  蓝节点固定生产配置
+conf/nginx-yellow.conf                黄节点固定生产配置
+conf/nginx-*.conf.template            经审批迁移地址时使用的通用模板
 ```

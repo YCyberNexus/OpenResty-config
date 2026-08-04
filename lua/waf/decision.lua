@@ -31,6 +31,10 @@ function Decision:match(req)
     end
   end
 
+  if req.raw_path ~= nil and req.raw_path ~= req.path then
+    return deny(403, "non_canonical_path")
+  end
+
   local rule = self.whitelist and self.whitelist:match(req.host, req.method, req.path)
   if not rule then return deny(403, "not_in_whitelist") end
 

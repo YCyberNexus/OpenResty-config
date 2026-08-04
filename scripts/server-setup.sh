@@ -32,10 +32,9 @@ if [[ -z "${LUAJIT:-}" || ! -x "$LUAJIT" ]]; then
 fi
 
 CONFIG="$PREFIX/conf/nginx-$NODE_ROLE.conf"
-TEMPLATE="$PREFIX/conf/nginx-$NODE_ROLE.conf.template"
 if [[ ! -f "$CONFIG" ]]; then
-  echo "缺少已渲染配置：$CONFIG" >&2
-  echo "请从 $TEMPLATE 复制，按审批台账替换全部 __PLACEHOLDER__ 后重试。" >&2
+  echo "缺少固定生产配置：$CONFIG" >&2
+  echo "请重新解压完整部署包；不要临时复制模板或手填现场地址。" >&2
   exit 2
 fi
 if grep -Eq '__[A-Z0-9_]+__' "$CONFIG"; then

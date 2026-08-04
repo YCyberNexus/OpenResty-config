@@ -6,7 +6,7 @@ OPENRESTY ?= openresty
 test:
 	@luajit spec/run.lua
 
-# 配置体检：静态检查运维维护的 conf/waf_rules.lua（默认空白名单、全拒绝）
+# 配置体检：静态检查运维维护的 conf/waf_rules.lua（当前放行 BY-002 五个知识库接口）
 lint:
 	@luajit scripts/check_rules.lua
 

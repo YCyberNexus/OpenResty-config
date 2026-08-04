@@ -37,6 +37,14 @@ describe("decision", function()
     assert.are.equal("query_not_allowed", decision:evaluate(request({ args = "", query_present = true })).reason)
   end)
 
+  it("rejects a raw path that Nginx normalized into an allowed path", function()
+    local result = decision:evaluate(request({
+      path = "/ai/knowledge/search",
+      raw_path = "/ai//knowledge/search",
+    }))
+    assert.are.equal("non_canonical_path", result.reason)
+  end)
+
   it("rejects truncated and duplicate headers", function()
     assert.are.equal("too_many_headers", decision:evaluate(request({ headers_truncated = true })).reason)
     local duplicate = decision:evaluate(request({

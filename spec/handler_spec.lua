@@ -193,6 +193,45 @@ describe("handler", function()
     assert.are.equal("unexpected_body", json.decode(captured.body).error)
   end)
 
+  it("matches and forwards a documented asset UUID path without broad prefix access", function()
+    handler.init(fixtures.active_config())
+    local uri = "/ai/knowledge/assets/f440c18e-a281-44bc-a878-8aa92b620879"
+    set_ngx({
+      host = "kb.pxsemic.tech",
+      method = "GET",
+      uri = uri,
+      upstream_response = {
+        status = 200,
+        body = json.encode(fixtures.asset_response()),
+        header = { ["Content-Type"] = "application/json" },
+      },
+    })
+    handler.access()
+    handler.proxy()
+    assert.are.equal(200, captured.exit_status)
+    assert.are.equal("/__waf_upstream" .. uri, captured.capture_uri)
+    assert.are.equal("BY-002-KB-ASSET", ngx.var.waf_rule_id)
+
+    set_ngx({
+      host = "kb.pxsemic.tech",
+      method = "GET",
+      uri = "/ai/knowledge/assets/not-a-uuid",
+    })
+    handler.access()
+    assert.are.equal(403, captured.exit_status)
+    assert.are.equal("not_in_whitelist", json.decode(captured.body).error)
+
+    set_ngx({
+      host = "kb.pxsemic.tech",
+      method = "GET",
+      uri = uri,
+      request_uri = "/ai/knowledge/assets//f440c18e-a281-44bc-a878-8aa92b620879",
+    })
+    handler.access()
+    assert.are.equal(403, captured.exit_status)
+    assert.are.equal("non_canonical_path", json.decode(captured.body).error)
+  end)
+
   it("captures, validates, normalizes, and audits an allowed response", function()
     local request = valid_search_request()
     request.upstream_response = valid_search_response()

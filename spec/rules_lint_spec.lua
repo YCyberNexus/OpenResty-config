@@ -22,7 +22,12 @@ describe("rules_lint", function()
   end)
 
   it("allows an empty deny-all rule file with one warning", function()
-    local issues = lint.lint(fixtures.active_config())
+    local issues = lint.lint({
+      max_request_body_bytes = 16384,
+      max_response_body_bytes = 1048576,
+      whitelist = {},
+      schemas = {},
+    })
     assert.are.equal(0, lint.count(issues, "error"))
     assert.are.equal(1, lint.count(issues, "warn"))
   end)
@@ -50,18 +55,36 @@ describe("rules_lint", function()
     assert.is_true(has(lint.lint(config), "error", "host"))
   end)
 
-  it("accepts only exact paths and rejects query enablement", function()
+  it("accepts exact paths or a terminal UUID template and rejects arbitrary patterns", function()
     local config = fixtures.config()
+    config.whitelist[#config.whitelist + 1] = {
+      id = "ASSET",
+      host = "127.0.0.1",
+      methods = { "GET" },
+      path_template = "/ai/knowledge/assets/{uuid}",
+      responses = {
+        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+      },
+    }
+    assert.are.equal(0, lint.count(lint.lint(config), "error"))
+
     config.whitelist[1].pattern = "^/ai/knowledge/.*$"
     config.whitelist[2].allow_query = true
+    config.whitelist[3].path_template = "/ai/knowledge/assets/{asset_id}"
     local issues = lint.lint(config)
     assert.is_true(has(issues, "error", "正则"))
     assert.is_true(has(issues, "error", "query"))
+    assert.is_true(has(issues, "error", "{uuid}"))
   end)
 
   it("reserves the internal response-capture path prefix", function()
     local config = fixtures.config()
     config.whitelist[1].path = "/__waf_upstream/ai/knowledge/health"
+    assert.is_true(has(lint.lint(config), "error", "保留"))
+
+    config = fixtures.config()
+    config.whitelist[1].path = nil
+    config.whitelist[1].path_template = "/__waf_upstream/assets/{uuid}"
     assert.is_true(has(lint.lint(config), "error", "保留"))
   end)
 
@@ -72,13 +95,19 @@ describe("rules_lint", function()
     assert.is_true(has(lint.lint(config), "error", "missing"))
   end)
 
-  it("requires additional_properties=false and valid required fields", function()
+  it("requires explicit additional_properties and warns on arbitrary fields", function()
     local config = fixtures.config()
-    config.schemas.knowledge_search_request.additional_properties = true
+    config.schemas.knowledge_search_request.additional_properties = nil
     config.schemas.knowledge_search_request.required[#config.schemas.knowledge_search_request.required + 1] = "tenant"
     local issues = lint.lint(config)
-    assert.is_true(has(issues, "error", "additional_properties=false"))
+    assert.is_true(has(issues, "error", "additional_properties"))
     assert.is_true(has(issues, "error", "tenant"))
+
+    config = fixtures.config()
+    config.schemas.knowledge_search_request.additional_properties = true
+    issues = lint.lint(config)
+    assert.are.equal(0, lint.count(issues, "error"))
+    assert.is_true(has(issues, "warn", "任意未登记字段"))
   end)
 
   it("rejects unknown formats, hooks, keywords, and incompatible constraints", function()
@@ -120,12 +149,35 @@ describe("rules_lint", function()
     assert.is_true(has(lint.lint(config), "error", "短路"))
   end)
 
-  it("requires a positive request limit no larger than 16 KiB", function()
+  it("rejects an exact route that overlaps a UUID path template", function()
+    local config = fixtures.config()
+    config.whitelist[#config.whitelist + 1] = {
+      id = "ASSET-TEMPLATE",
+      host = "127.0.0.1",
+      methods = { "GET" },
+      path_template = "/ai/knowledge/assets/{uuid}",
+      responses = {
+        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+      },
+    }
+    config.whitelist[#config.whitelist + 1] = {
+      id = "ASSET-EXACT",
+      host = "127.0.0.1",
+      methods = { "GET" },
+      path = "/ai/knowledge/assets/f440c18e-a281-44bc-a878-8aa92b620879",
+      responses = {
+        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+      },
+    }
+    assert.is_true(has(lint.lint(config), "error", "重叠"))
+  end)
+
+  it("requires a positive request limit no larger than 128 KiB", function()
     local config = fixtures.config()
     config.max_request_body_bytes = 0
     assert.is_true(has(lint.lint(config), "error", "大于 0"))
-    config.max_request_body_bytes = 16385
-    assert.is_true(has(lint.lint(config), "error", "16384"))
+    config.max_request_body_bytes = 131073
+    assert.is_true(has(lint.lint(config), "error", "131072"))
   end)
 
   it("requires bounded, status-specific response schemas", function()
