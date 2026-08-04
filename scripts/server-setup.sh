@@ -6,6 +6,7 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/openresty-waf}"
 RUN_GROUP="${RUN_GROUP:-nobody}"
+RUN_USER="${RUN_USER:-nobody}"
 OPENRESTY="${OPENRESTY:-/data/openresty/bin/openresty}"
 LUAJIT="${LUAJIT:-/data/openresty/luajit/bin/luajit}"
 NODE_ROLE="${NODE_ROLE:-}"
@@ -46,6 +47,7 @@ fi
 echo "== 1. 准备持久化审计目录 =="
 install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/audit"
 install -d -o root -g "$RUN_GROUP" -m 0750 "$DATA_ROOT/log"
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$DATA_ROOT/client_body_temp"
 for log_file in "$DATA_ROOT/audit/access.log" "$DATA_ROOT/audit/rejected.log" \
   "$DATA_ROOT/log/error.log"; do
   if [[ ! -e "$log_file" ]]; then
@@ -57,6 +59,7 @@ for log_file in "$DATA_ROOT/audit/access.log" "$DATA_ROOT/audit/rejected.log" \
 done
 echo "  审计：$DATA_ROOT/audit/access.log"
 echo "  运行日志：$DATA_ROOT/log/error.log"
+echo "  大请求临时目录：$DATA_ROOT/client_body_temp"
 
 echo "== 2. 加固程序权限 =="
 chown -R "root:$RUN_GROUP" "$PREFIX"
@@ -64,7 +67,10 @@ find "$PREFIX" -type d -exec chmod 0750 {} +
 find "$PREFIX" -type f -exec chmod 0640 {} +
 
 echo "== 3. 规则与 nginx 配置校验 =="
-"$LUAJIT" "${PREFIX}/scripts/check_rules.lua" "${PREFIX}/conf/waf_rules.lua"
+"$LUAJIT" "${PREFIX}/scripts/check_rules.lua" \
+  "${PREFIX}/conf/waf_rules.lua" \
+  "${PREFIX}/conf/waf_routes.lua" \
+  "${PREFIX}/conf/waf_policies.lua"
 "$OPENRESTY" -p "$PREFIX/" -c "conf/nginx-$NODE_ROLE.conf" -t
 
 cat <<EOF
@@ -79,8 +85,9 @@ cat <<EOF
    并按审批端口配置 http_port_t（接口文档没有端口，本脚本不代填）。
 
 2. 核对四层策略只允许已登记的源、目标 IP 和端口：蓝区业务 -> 蓝 WAF；
-   蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。蓝、黄两侧 conf/waf_rules.lua
-   必须分发同一份规则文件，并逐条核对 Host、请求 schema 和逐状态码响应 schema。
+   蓝 WAF -> 黄 WAF；黄 WAF -> 已登记目标服务。蓝、黄两侧 waf_rules.lua、
+   waf_routes.lua、waf_policies.lua 必须分别一致，并逐条核对 Host、固定下一跳、
+   请求契约和逐状态码响应契约。
 
 3. 安装或更新服务单元（此时不启动）：
    install -o root -g root -m 0644 "$PREFIX/deploy/openresty-waf@.service" /etc/systemd/system/openresty-waf@.service

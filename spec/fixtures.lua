@@ -9,8 +9,35 @@ function M.active_config()
   return assert(loadfile("conf/waf_rules.lua"))()
 end
 
+function M.policies()
+  return assert(loadfile("conf/waf_policies.lua"))()
+end
+
+function M.active_routes()
+  return assert(loadfile("conf/waf_routes.lua"))()
+end
+
+function M.config_routes()
+  return assert(loadfile("conf/waf_routes_knowledge_example.lua"))()
+end
+
 function M.same_path_config()
   return assert(loadfile("conf/waf_rules_same_path_example.lua"))()
+end
+
+function M.routes_for(config, role)
+  role = role or "dev"
+  local node = {}
+  for _, rule in ipairs(config.whitelist or {}) do
+    node[rule.host] = {
+      scheme = "http",
+      address = "127.0.0.1",
+      port = 18080,
+      upstream_host = "knowledge-stub.local",
+      timeout_profile = "standard",
+    }
+  end
+  return { version = 2, required_node_roles = { role }, nodes = { [role] = node } }
 end
 
 function M.search_request(overrides)

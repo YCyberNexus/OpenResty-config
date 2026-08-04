@@ -24,32 +24,38 @@ describe("url_filter", function()
     assert.are.equal("B", filter:match(b.host, "POST", "/same").id)
   end)
 
-  it("matches only a canonical UUID in a terminal path template", function()
+  it("matches typed named parameters in any path segment", function()
     local filter = UrlFilter.new({
       {
         id = "ASSET",
         host = "service.example.internal",
         methods = { "GET" },
-        path_template = "/ai/knowledge/assets/{uuid}",
+        path_template = "/tenants/{tenant_id}/assets/{asset_id}",
+        path_parameters = {
+          tenant_id = { type = "string", format = "slug" },
+          asset_id = { type = "string", format = "uuid" },
+        },
       },
     })
-    local prefix = "/ai/knowledge/assets/"
-    assert.are.equal("ASSET", filter:match("service.example.internal", "GET",
-      prefix .. "f440c18e-a281-44bc-a878-8aa92b620879").id)
-    assert.is_not_nil(filter:match("service.example.internal", "GET",
-      prefix .. "F440C18E-A281-44BC-A878-8AA92B620879"))
-    assert.is_nil(filter:match("service.example.internal", "GET", prefix .. "not-a-uuid"))
+    local path = "/tenants/team-a/assets/f440c18e-a281-44bc-a878-8aa92b620879"
+    local rule, params = filter:match("service.example.internal", "GET", path)
+    assert.are.equal("ASSET", rule.id)
+    assert.are.equal("team-a", params.tenant_id)
+    assert.are.equal("f440c18e-a281-44bc-a878-8aa92b620879", params.asset_id)
     assert.is_nil(filter:match("service.example.internal", "GET",
-      prefix .. "f440c18e-a281-44bc-a878-8aa92b620879/extra"))
-    assert.is_nil(filter:match("service.example.internal", "POST",
-      prefix .. "f440c18e-a281-44bc-a878-8aa92b620879"))
+      "/tenants/team-a/assets/not-a-uuid"))
+    assert.is_nil(filter:match("service.example.internal", "GET", path .. "/extra"))
+    assert.is_nil(filter:match("service.example.internal", "POST", path))
   end)
 
   it("detects overlap between an exact UUID route and its template", function()
     local exact = {
       path = "/ai/knowledge/assets/f440c18e-a281-44bc-a878-8aa92b620879",
     }
-    local template = { path_template = "/ai/knowledge/assets/{uuid}" }
+    local template = {
+      path_template = "/ai/knowledge/assets/{asset_id}",
+      path_parameters = { asset_id = { type = "string", format = "uuid" } },
+    }
     assert.is_true(UrlFilter.paths_overlap(exact, template))
     assert.is_false(UrlFilter.paths_overlap(
       { path = "/ai/knowledge/assets/not-a-uuid" }, template))

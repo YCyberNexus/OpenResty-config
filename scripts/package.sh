@@ -4,7 +4,7 @@
 # 等开发期内容。
 #
 # 用法(在仓库根目录执行):
-#   bash scripts/package.sh                 # 生成 openresty-waf-simplify.tgz
+#   bash scripts/package.sh                 # 生成 openresty-waf-v2.tgz
 #   bash scripts/package.sh /tmp/waf.tgz    # 指定输出路径
 set -euo pipefail
 
@@ -12,7 +12,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 PKG_NAME="openresty-waf"        # 解包后的顶层目录名
-OUT="${1:-$ROOT/openresty-waf-simplify.tgz}"
+OUT="${1:-$ROOT/openresty-waf-v2.tgz}"
+
+if [[ -e "$OUT" ]]; then
+  echo "输出文件已存在，拒绝覆盖：$OUT" >&2
+  exit 2
+fi
 
 # 运行期 + 部署需要随包带上的文件(logs/ 不带,在服务器上现建)
 FILES=(
@@ -26,8 +31,12 @@ FILES=(
   conf/waf-audit-vars.conf
   conf/waf-public-location.conf
   conf/waf-internal-proxy-common.conf
+  conf/waf-internal-locations.conf
   conf/waf_rules.lua
+  conf/waf_routes.lua
+  conf/waf_policies.lua
   conf/waf_rules_knowledge_example.lua
+  conf/waf_routes_knowledge_example.lua
   conf/waf_rules_same_path_example.lua
   lua/waf/url_filter.lua
   lua/waf/json_validator.lua
@@ -35,6 +44,9 @@ FILES=(
   lua/waf/factory.lua
   lua/waf/handler.lua
   lua/waf/rules_lint.lua
+  lua/waf/request_normalizer.lua
+  lua/waf/policy_engine.lua
+  lua/waf/route_table.lua
   scripts/smoke.sh
   scripts/server-setup.sh
   scripts/check_rules.lua
@@ -46,7 +58,15 @@ FILES=(
   docs/知识库接口文档.md
 )
 
-TMP="$(mktemp -d)"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP="$(mktemp -d "$TMP_BASE/openresty-waf-package.XXXXXX")"
+cleanup() {
+  if [[ -n "${TMP:-}" && -d "$TMP" && ! -L "$TMP"
+    && "$(basename "$TMP")" == openresty-waf-package.* ]]; then
+    rm -rf -- "$TMP"
+  fi
+}
+trap cleanup EXIT
 STAGE="$TMP/$PKG_NAME"
 mkdir -p "$STAGE"
 for f in "${FILES[@]}"; do
@@ -62,7 +82,6 @@ find "$STAGE" -type f \( -name '*.sh' -o -name '*.lua' -o -name '*.conf' -o -nam
 
 # COPYFILE_DISABLE=1 阻止 macOS 往 tar 里塞 ._AppleDouble / 扩展属性条目
 COPYFILE_DISABLE=1 tar -czf "$OUT" -C "$TMP" "$PKG_NAME"
-rm -rf "$TMP"
 
 echo "打包完成: $OUT"
 echo "内容:"

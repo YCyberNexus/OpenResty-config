@@ -1,5 +1,4 @@
-# 蓝区 WAF 生产模板：蓝区服务 -> 蓝 WAF -> HTTP -> 黄 WAF。
-# 蓝/黄节点间的来源、目标 IP 和端口限制由现有四层网络策略负责。
+# 蓝区 WAF V2 模板；业务 Host/下一跳不在 Nginx 模板中维护，统一由 Lua 配置控制。
 user nobody;
 worker_processes auto;
 error_log /data/openresty-waf/log/error.log info;
@@ -9,18 +8,11 @@ events { worker_connections 2048; }
 
 http {
   include waf-http-common.conf;
-
+  client_body_temp_path /data/openresty-waf/client_body_temp 1 2;
   init_by_lua_block {
-    local rules = require("waf_rules")
-    require("waf.handler").init(rules)
+    require("waf.handler").init(
+      require("waf_rules"), require("waf_routes"), require("waf_policies"), "blue")
   }
-
-  upstream yellow_waf {
-    server __YELLOW_WAF_IP__:__YELLOW_WAF_PORT__;
-    keepalive 32;
-  }
-
-  # 未命中业务 Host 的请求直接拒绝，同时先注册 Lua 可写审计变量。
   server {
     listen __BLUE_WAF_LISTEN_IP__:__BLUE_WAF_LISTEN_PORT__ default_server;
     server_name "";
@@ -29,38 +21,20 @@ http {
     include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/rejected.log waf_reject;
     location / {
-      content_by_lua_block {
-        ngx.req.read_body()
-        return ngx.exit(444)
-      }
+      return 444;
     }
   }
-
   include waf-audit-log-format.conf;
-
   server {
     listen __BLUE_WAF_LISTEN_IP__:__BLUE_WAF_LISTEN_PORT__;
-    # 两个服务 Host 必须与两端 waf_rules.lua 中的 rule.host 精确一致。
-    server_name __WAF_SERVICE_HOST_A__ __WAF_SERVICE_HOST_B__;
+    server_name ~^.+$;
     default_type application/json;
-
     set $waf_node_role "blue";
     set $waf_trace_id $request_id;
     include waf-audit-vars.conf;
     access_log /data/openresty-waf/audit/access.log waf_audit;
     add_header X-Request-ID $waf_trace_id always;
-
-    location / {
-      include waf-public-location.conf;
-    }
-
-    # 仅 handler.proxy() 可以发起此内部子请求；前缀会在代理前剥离。
-    location ^~ /__waf_upstream/ {
-      internal;
-      rewrite ^/__waf_upstream(/.*)$ $1 break;
-      proxy_pass http://yellow_waf;
-      proxy_set_header Host $host;
-      include waf-internal-proxy-common.conf;
-    }
+    location / { include waf-public-location.conf; }
+    include waf-internal-locations.conf;
   }
 }

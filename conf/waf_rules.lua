@@ -43,9 +43,14 @@ local version_summary = {
 }
 
 return {
-  -- /graph/query 允许 20000 个 UTF-8 字符；128 KiB 是请求 JSON 的统一硬上限。
-  max_request_body_bytes = 131072,
-  max_response_body_bytes = 1048576,
+  version = 2,
+  limits = {
+    max_query_string_bytes = 8192,
+    max_buffered_request_body_bytes = 1048576,
+    max_buffered_response_body_bytes = 1048576,
+    max_stream_request_body_bytes = 67108864,
+    max_stream_response_body_bytes = 268435456,
+  },
 
   whitelist = {
     {
@@ -53,21 +58,41 @@ return {
       host = "kb.pxsemic.tech",
       methods = { "POST" },
       path = "/ai/knowledge/search",
-      request_schema = "knowledge_search_request",
+      transport = "buffered",
+      auth_policy = "network_only",
+      request = {
+        body = {
+          mode = "json",
+          required = true,
+          media_types = { "application/json" },
+          schema = "knowledge_search_request",
+          max_body_bytes = 131072,
+        },
+      },
       responses = {
-        [200] = { schema = "knowledge_search_response", max_body_bytes = 1048576 },
-        [422] = { schema = "knowledge_error_response", max_body_bytes = 16384 },
-        [502] = { schema = "knowledge_error_response", max_body_bytes = 16384 },
-        [503] = { schema = "knowledge_error_response", max_body_bytes = 16384 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_search_response", max_body_bytes = 1048576 } },
+        [422] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_error_response", max_body_bytes = 16384 } },
+        [502] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_error_response", max_body_bytes = 16384 } },
+        [503] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_error_response", max_body_bytes = 16384 } },
       },
     },
     {
       id = "BY-002-KB-ASSET",
       host = "kb.pxsemic.tech",
       methods = { "GET" },
-      path_template = "/ai/knowledge/assets/{uuid}",
+      path_template = "/ai/knowledge/assets/{asset_id}",
+      path_parameters = {
+        asset_id = { type = "string", format = "uuid" },
+      },
+      transport = "buffered",
+      auth_policy = "network_only",
       responses = {
-        [200] = { schema = "knowledge_asset_response", max_body_bytes = 1048576 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_asset_response", max_body_bytes = 1048576 } },
       },
     },
     {
@@ -75,8 +100,11 @@ return {
       host = "kb.pxsemic.tech",
       methods = { "GET" },
       path = "/ai/knowledge/health",
+      transport = "buffered",
+      auth_policy = "network_only",
       responses = {
-        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_health_response", max_body_bytes = 16384 } },
       },
     },
     {
@@ -84,9 +112,21 @@ return {
       host = "kb.pxsemic.tech",
       methods = { "POST" },
       path = "/ai/knowledge/graph/query",
-      request_schema = "knowledge_graph_query_request",
+      transport = "buffered",
+      auth_policy = "network_only",
+      request = {
+        policies = { "cypher_read_only_v1" },
+        body = {
+          mode = "json",
+          required = true,
+          media_types = { "application/json" },
+          schema = "knowledge_graph_query_request",
+          max_body_bytes = 131072,
+        },
+      },
       responses = {
-        [200] = { schema = "knowledge_graph_query_response", max_body_bytes = 1048576 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_graph_query_response", max_body_bytes = 1048576 } },
       },
     },
     {
@@ -94,8 +134,11 @@ return {
       host = "kb.pxsemic.tech",
       methods = { "GET" },
       path = "/ai/knowledge/graph/health",
+      transport = "buffered",
+      auth_policy = "network_only",
       responses = {
-        [200] = { schema = "knowledge_graph_health_response", max_body_bytes = 16384 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_graph_health_response", max_body_bytes = 16384 } },
       },
     },
   },

@@ -6,7 +6,7 @@ OPENRESTY ?= openresty
 test:
 	@luajit spec/run.lua
 
-# 配置体检：静态检查运维维护的 conf/waf_rules.lua（当前放行 BY-002 五个知识库接口）
+# 配置体检：同时检查 V2 接口规则、固定路由和可复用策略。
 lint:
 	@luajit scripts/check_rules.lua
 

@@ -121,6 +121,23 @@ local FORMATS = {
     return value ~= "" and not value:find("/", 1, true)
       and not value:find("\\", 1, true) and not has_control(value)
   end,
+  path_segment = function(value)
+    return value ~= "" and value ~= "." and value ~= ".."
+      and not value:find("/", 1, true) and not value:find("\\", 1, true)
+      and not has_control(value)
+  end,
+  digits = function(value)
+    return value:match("^[0-9]+$") ~= nil
+  end,
+  slug = function(value)
+    return value:match("^[A-Za-z0-9][A-Za-z0-9._~-]*$") ~= nil
+  end,
+  header_value = function(value)
+    return value ~= "" and not has_control(value)
+  end,
+  base64url = function(value)
+    return value ~= "" and value:match("^[A-Za-z0-9_-]+=*$") ~= nil
+  end,
 }
 
 function JsonValidator.new(schema, opts)

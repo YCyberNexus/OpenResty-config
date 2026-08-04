@@ -1,7 +1,13 @@
 -- 单服务知识库示例：用于本地 Host/请求/响应校验测试，不代表生产放行。
 return {
-  max_request_body_bytes = 16384,
-  max_response_body_bytes = 1048576,
+  version = 2,
+  limits = {
+    max_query_string_bytes = 8192,
+    max_buffered_request_body_bytes = 1048576,
+    max_buffered_response_body_bytes = 1048576,
+    max_stream_request_body_bytes = 67108864,
+    max_stream_response_body_bytes = 268435456,
+  },
 
   whitelist = {
     {
@@ -9,8 +15,11 @@ return {
       host = "127.0.0.1",
       methods = { "GET" },
       path = "/ai/knowledge/health",
+      transport = "buffered",
+      auth_policy = "network_only",
       responses = {
-        [200] = { schema = "knowledge_health_response", max_body_bytes = 16384 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_health_response", max_body_bytes = 16384 } },
       },
     },
     {
@@ -18,12 +27,21 @@ return {
       host = "127.0.0.1",
       methods = { "POST" },
       path = "/ai/knowledge/search",
-      request_schema = "knowledge_search_request",
+      transport = "buffered",
+      auth_policy = "network_only",
+      request = {
+        body = { mode = "json", required = true, media_types = { "application/json" },
+          schema = "knowledge_search_request", max_body_bytes = 16384, audit_body = true },
+      },
       responses = {
-        [200] = { schema = "knowledge_search_response", max_body_bytes = 1048576 },
-        [422] = { schema = "knowledge_error_response", max_body_bytes = 16384 },
-        [502] = { schema = "knowledge_error_response", max_body_bytes = 16384 },
-        [503] = { schema = "knowledge_error_response", max_body_bytes = 16384 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_search_response", max_body_bytes = 1048576, audit_body = true } },
+        [422] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_error_response", max_body_bytes = 16384 } },
+        [502] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_error_response", max_body_bytes = 16384 } },
+        [503] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "knowledge_error_response", max_body_bytes = 16384 } },
       },
     },
   },

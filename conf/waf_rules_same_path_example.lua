@@ -1,8 +1,14 @@
 -- 两个不同 Host 使用相同 method/path、不同请求和响应契约的最小示例。
 -- 字段仅用于演示能力，不能替代两个真实服务的接口文档或生产审批。
 return {
-  max_request_body_bytes = 16384,
-  max_response_body_bytes = 1048576,
+  version = 2,
+  limits = {
+    max_query_string_bytes = 8192,
+    max_buffered_request_body_bytes = 1048576,
+    max_buffered_response_body_bytes = 1048576,
+    max_stream_request_body_bytes = 67108864,
+    max_stream_response_body_bytes = 268435456,
+  },
 
   whitelist = {
     {
@@ -10,9 +16,14 @@ return {
       host = "service-a.example.internal",
       methods = { "POST" },
       path = "/ai/knowledge/search",
-      request_schema = "service_a_request",
+      transport = "buffered",
+      auth_policy = "network_only",
+      request = { body = { mode = "json", required = true,
+        media_types = { "application/json" }, schema = "service_a_request",
+        max_body_bytes = 16384 } },
       responses = {
-        [200] = { schema = "service_a_response", max_body_bytes = 65536 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "service_a_response", max_body_bytes = 65536 } },
       },
     },
     {
@@ -20,9 +31,14 @@ return {
       host = "service-b.example.internal",
       methods = { "POST" },
       path = "/ai/knowledge/search",
-      request_schema = "service_b_request",
+      transport = "buffered",
+      auth_policy = "network_only",
+      request = { body = { mode = "json", required = true,
+        media_types = { "application/json" }, schema = "service_b_request",
+        max_body_bytes = 16384 } },
       responses = {
-        [200] = { schema = "service_b_response", max_body_bytes = 65536 },
+        [200] = { body = { mode = "json", media_types = { "application/json" },
+          schema = "service_b_response", max_body_bytes = 65536 } },
       },
     },
   },

@@ -24,7 +24,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/data/openresty-waf/audit /data/openresty-waf/log /run/openresty-waf
+ReadWritePaths=/data/openresty-waf/audit /data/openresty-waf/log /data/openresty-waf/client_body_temp /run/openresty-waf
 
 [Install]
 WantedBy=multi-user.target

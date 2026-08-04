@@ -4,7 +4,7 @@ describe("factory", function()
     local decision = require("waf.factory").build_decision(fixtures.config(), {
       null_value = fixtures.json.null,
       array_mt = fixtures.json.array_mt,
-    })
+    }, fixtures.policies())
     local result = decision:evaluate({
       host = "127.0.0.1",
       method = "POST",

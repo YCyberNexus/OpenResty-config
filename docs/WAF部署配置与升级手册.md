@@ -1,735 +1,440 @@
-# WAF 部署配置与升级手册
+# OpenResty WAF 通用 V2 配置、部署与升级手册
 
-## 1. 配置文件
+## 1. 结论
 
-部署时主要使用以下文件：
+V2 只需整体部署一次。之后新增普通 HTTP API，不再修改 Lua 或 Nginx 运行时，只修改以下配置：
 
-| 文件 | 用途 | 是否需要修改 |
-|---|---|---|
-| `conf/waf_rules.lua` | 业务 Host、接口、请求和响应 schema | 必须按实际接口修改 |
-| `conf/nginx-blue.conf` | 蓝 WAF 固定生产配置 | 当前现场不修改 |
-| `conf/nginx-yellow.conf` | 黄 WAF 固定生产配置 | 当前现场不修改 |
-| `conf/nginx-*.conf.template` | 迁移到其它地址时使用的通用模板 | 当前部署不使用 |
-| `conf/waf-http-common.conf` | 请求大小、响应缓冲和默认拒绝日志 | 通常不修改 |
-| `conf/waf-audit-log-format.conf` | 业务审计日志字段 | 通常不修改 |
-| `conf/waf-audit-vars.conf` | Lua 可写审计变量 | 不修改 |
-| `conf/waf-internal-proxy-common.conf` | 固定 upstream 的请求头和超时 | 确认超时即可 |
-| `deploy/openresty-waf@.service` | 蓝、黄 systemd 服务模板 | 通常不修改 |
-| `docs/BY-002图谱增强检索运维配置说明.md` | BY-002 五接口现场变更、检查、验收和回滚步骤 | 转交运维执行 |
-
-服务器最终生效的文件是：
-
-```text
-/opt/openresty-waf/conf/nginx-blue.conf
-/opt/openresty-waf/conf/nginx-yellow.conf
-/opt/openresty-waf/conf/waf_rules.lua
-/opt/openresty-waf/lua/waf/*.lua
-/etc/systemd/system/openresty-waf@.service
-```
-
-蓝、黄节点必须使用同一个部署包和内容完全一致的 `waf_rules.lua`。
-
-2026-07-31 已把现场 Nginx 值固化到仓库和部署包：
-
-```text
-蓝 WAF：10.64.5.4:80
-黄 WAF：10.64.9.2:80
-业务 Host：kb.pxsemic.tech、kb-1.pxsemic.tech
-黄区固定后端：192.168.14.249:6789
-后端 Host：两个入口都发送 kb.pxsemic.tech
-```
-
-`kb-1.pxsemic.tech` 当前是同一后端的入口别名。只有在地址、端口、业务 Host 或后端要求的
-Host 经审批发生变化时，才修改固定 `.conf`；不要在每次安装或升级时重新从模板生成。
-
-## 2. 需要准备的配置值
-
-配置前收集以下值，不明确的值不要猜测：
-
-| 配置 | 说明 |
+| 变化 | 修改文件 |
 |---|---|
-| 业务 Host A/B | 调用方实际使用的 Host，也是 WAF 选择规则和黄端后端的依据 |
-| 蓝 WAF 监听 IP/端口 | 业务调用方连接蓝 WAF 的地址 |
-| 黄 WAF 监听 IP/端口 | 蓝 WAF 连接黄 WAF 的地址 |
-| 后端 A/B 的 IP/端口 | 黄 WAF 固定连接的两个目标服务 |
-| 后端 A/B 要求的 Host | 黄 WAF 发给后端的 HTTP Host |
-| method/path | 每个接口的 HTTP 方法和精确路径；资产接口可使用末尾 UUID 受限模板 |
-| 请求字段 | 字段名、类型、是否必填、长度或数值范围 |
-| 响应状态码和字段 | 每个允许状态码都要配置独立响应 schema |
-| 大小限制 | 请求体上限及每个状态码的响应体上限 |
+| 新增/修改接口、路径、Query、头、请求/响应契约 | `conf/waf_rules.lua` |
+| 新增 Host、后端 IP/端口、上游 Host、默认超时档 | `conf/waf_routes.lua` |
+| 复用 Bearer/API Key/Basic 或内置业务策略 | 通常只在规则中引用；新增策略实例时改 `conf/waf_policies.lua` |
 
-规则的匹配键是：
+配置变更仍需在黄、蓝两端分发、体检、`openresty -t` 和 reload，但不需要重新部署整个包。
 
-```text
-host + method + path
-```
+第一次从 V1 升到 V2 必须整体替换，因为本次同时修改了 Lua 运行时、Nginx 内部代理、审计变量、
+配置格式和技术上限。
 
-除精确 path 外，当前仅支持一个受限例外：末尾路径段为 `{uuid}`，例如
-`/ai/knowledge/assets/{uuid}`。它只匹配规范 UUID，不是正则或任意前缀放行。
-
-两个服务使用相同 method/path 时，必须使用不同 Host。例如：
+## 2. 架构与现网固定值
 
 ```text
-service-a.example.internal + POST + /ai/knowledge/search → 后端 A
-service-b.example.internal + POST + /ai/knowledge/search → 后端 B
+蓝区调用方
+  -> 10.64.5.4:80       蓝 WAF（node_role=blue）
+  -> 10.64.9.2:80       黄 WAF（node_role=yellow）
+  -> 192.168.14.249:6789 黄区知识库服务
 ```
 
-## 3. 配置 `waf_rules.lua`
+当前服务 Host：
 
-### 3.1 顶层配置与当前活动规则
+- `kb.pxsemic.tech`：存在固定路由和五条活动接口规则；
+- `kb-1.pxsemic.tech`：存在固定路由但无活动接口规则，因此默认拒绝。
 
-下面是用于说明顶层结构的最小拒绝配置；`whitelist` 为空时所有业务接口都会被拒绝：
+这些地址来自现场确认，不是从三区架构图推断。蓝到黄、黄到后端的源/目标 IP 与端口限制仍由
+四层 ACL/防火墙负责。WAF 不替代 AD、Jumpserver、EDR、DLP 或日志平台。
+
+## 3. V2 文件职责
+
+### 3.1 接口契约：`conf/waf_rules.lua`
+
+每条规则必须明确：
+
+- 稳定唯一的 `id`；
+- 小写精确 `host`；
+- 允许的 `methods`；
+- 精确 `path`，或带命名参数的 `path_template`；
+- `buffered` 或 `stream`；
+- `auth_policy`；
+- Query、请求头、请求正文；
+- 每个允许响应状态的正文和响应头策略。
+
+没有登记的 Host、method、path、Query、正文、状态码或媒体类型均默认拒绝。
+
+### 3.2 固定下一跳：`conf/waf_routes.lua`
+
+路由按节点角色和业务 Host 配置。`address` 只允许固定规范 IPv4，不允许域名、变量或客户端输入。
 
 ```lua
-return {
-  max_request_body_bytes = 131072,
-  max_response_body_bytes = 1048576,
-
-  whitelist = {},
-  schemas = {},
-}
-```
-
-仓库当前实际的 `conf/waf_rules.lua` 登记五条规则：
-
-```text
-BY-002-KB-SEARCH          POST kb.pxsemic.tech   /ai/knowledge/search
-BY-002-KB-ASSET           GET  kb.pxsemic.tech   /ai/knowledge/assets/{uuid}
-BY-002-KB-HEALTH          GET  kb.pxsemic.tech   /ai/knowledge/health
-BY-002-KB-GRAPH-QUERY     POST kb.pxsemic.tech   /ai/knowledge/graph/query
-BY-002-KB-GRAPH-HEALTH    GET  kb.pxsemic.tech   /ai/knowledge/graph/health
-```
-
-检索接口要求 `query` 必填，只接受 `query`、`top_k`；图谱查询单独走
-`/ai/knowledge/graph/query`。资产详情路径只允许一个规范 UUID。源文档未登记四个新增接口
-的错误状态码，因此当前只允许其 `200` 响应；检索接口继续允许 `200`、`422`、`502`、
-`503`。Nginx 中存在的 `kb-1.pxsemic.tech` 不在活动白名单内，请求会被七层规则拒绝。
-
-| 字段 | 说明 |
-|---|---|
-| `max_request_body_bytes` | 全局请求体上限，必须大于 0，最大 131072 字节 |
-| `max_response_body_bytes` | 全局响应体上限，必须大于 0，最大 1048576 字节 |
-| `whitelist` | 接口白名单数组；空数组会拒绝所有业务接口 |
-| `schemas` | 请求和响应 schema 字典，名称由规则引用 |
-
-固定行为：
-
-- query string 一律拒绝；
-- 有请求体的接口只接受 `application/json`；
-- 未配置 `request_schema` 的接口禁止请求体；
-- 响应只接受 JSON，gzip、SSE、流式和二进制响应不支持；
-- 未登记的 Host、method、path、非 UUID 资产参数、字段或响应状态码均拒绝。
-
-### 3.2 白名单规则
-
-POST 接口示例：
-
-```lua
-{
-  id = "SERVICE-A-SEARCH",
-  host = "service-a.example.internal",
-  methods = { "POST" },
-  path = "/ai/knowledge/search",
-  request_schema = "service_a_request",
-  responses = {
-    [200] = { schema = "service_a_success_response", max_body_bytes = 65536 },
-    [422] = { schema = "service_a_error_response", max_body_bytes = 16384 },
-    [502] = { schema = "service_a_error_response", max_body_bytes = 16384 },
+nodes = {
+  blue = {
+    ["api.example.internal"] = {
+      scheme = "http",
+      address = "10.64.9.2",
+      port = 80,
+      upstream_host = "api.example.internal",
+      timeout_profile = "standard",
+    },
+  },
+  yellow = {
+    ["api.example.internal"] = {
+      scheme = "http",
+      address = "192.168.14.250",
+      port = 8080,
+      upstream_host = "api-backend.internal",
+      timeout_profile = "standard",
+    },
   },
 }
 ```
 
-无请求体接口示例：
+Nginx 的非空 Host 正则虚拟主机只负责把请求交给 Lua，再由 Lua 做精确 Host 门禁；空 Host 仍由
+default server 直接拒绝。新增 Host 不需要新增 Nginx `server` 块；如果规则或任一生产节点路由
+缺失，启动体检失败或请求被拒绝，不会回落到其它后端。
+
+### 3.3 可复用策略：`conf/waf_policies.lua`
+
+预置超时档：
+
+| 名称 | connect | send | read | 用途 |
+|---|---:|---:|---:|---|
+| `fast` | 2s | 10s | 15s | 快速健康检查 |
+| `standard` | 5s | 30s | 60s | 普通 API |
+| `long` | 5s | 300s | 3600s | SSE、长任务或大文件 |
+
+预置认证门禁：
+
+- `network_only`：不转发客户端凭证，只依赖现有四层来源限制；
+- `bearer`：要求并转发合法语法的 `Authorization: Bearer ...`；
+- `api_key`：要求并转发合法语法的 `X-API-Key`；
+- `basic`：要求并转发合法语法的 `Authorization: Basic ...`。
+
+这些门禁只校验凭证存在性和语法。令牌、API Key、账号密码的真实性与权限必须由后端验证。
+
+当前内置业务策略 `cypher_read_only_v1` 采用保守白名单：允许以 MATCH、OPTIONAL、UNWIND、
+WITH、RETURN（可带 EXPLAIN/PROFILE）开头的单条只读查询；拒绝 CREATE、MERGE、DELETE、SET、
+REMOVE、LOAD、CALL、管理关键字、分号多语句和无法安全解析的引号/注释。
+
+## 4. 通用配置示例
+
+### 4.1 多个路径参数
 
 ```lua
 {
-  id = "SERVICE-A-HEALTH",
-  host = "service-a.example.internal",
+  id = "DOC-VERSION-DETAIL",
+  host = "api.example.internal",
   methods = { "GET" },
-  path = "/ai/knowledge/health",
-  responses = {
-    [200] = { schema = "service_a_health_response", max_body_bytes = 16384 },
+  path_template = "/tenants/{tenant_id}/documents/{document_id}/versions/{version_no}",
+  path_parameters = {
+    tenant_id = { type = "string", format = "slug" },
+    document_id = { type = "string", format = "uuid" },
+    version_no = { type = "string", format = "digits", max_length = 10 },
   },
+  transport = "buffered",
+  auth_policy = "bearer",
+  responses = { -- 见下文 },
 }
 ```
 
-| 字段 | 配置要求 |
-|---|---|
-| `id` | 唯一、稳定的规则编号；建议与白名单台账编号一致 |
-| `host` | 小写精确 Host，不含端口、路径、通配符或正则 |
-| `methods` | 大写 HTTP 方法数组，例如 `{ "GET" }`、`{ "POST" }` |
-| `path` | 以 `/` 开头的精确路径，不含 query 或 fragment |
-| `path_template` | 与 `path` 二选一；仅支持以独立 `{uuid}` 路径段结尾，例如 `/ai/knowledge/assets/{uuid}` |
-| `request_schema` | 有请求体时必填；无请求体接口不要填写 |
-| `responses` | 必填；每个允许状态码配置 schema 和 `max_body_bytes` |
+模板参数必须占满整个路径段、名称唯一，并逐个配置 string schema。运行时不接受正则路径。
+`uuid`、`slug`、`digits`、`path_segment`、`enum` 等约束可以组合使用。可能重叠的同 Host、
+method 路由会被静态体检拒绝。
 
-`/__waf_upstream` 是内部保留前缀，不能配置为业务 path。
+### 4.2 Query 参数
 
-### 3.3 请求 schema
+先在 `schemas` 中声明对象：
 
 ```lua
-service_a_request = {
+document_list_query = {
   type = "object",
   additional_properties = false,
-  required = { "query" },
+  required = { "page", "enabled" },
   properties = {
-    query = {
-      type = "string",
-      min_length = 1,
-      max_length = 4000,
-      max_bytes = 16000,
-      non_blank = true,
-      trimmed = true,
-    },
-    top_k = {
-      type = "integer",
-      minimum = 1,
-      maximum = 50,
-    },
-  },
-}
-```
-
-说明：
-
-- `required` 中的字段必须出现；
-- 未写入 `required` 的字段可以省略，WAF 不会自动补默认值；
-- object 必须显式配置 `additional_properties`；通常使用 `false` 拒绝未登记字段。
-  当前五处文档明确的动态对象使用 `true`：检索 metadata、资产 raw document metadata、
-  图谱请求/响应 parameters 和图谱 rows；规则检查会逐项报告安全偏离 warning；
-- `max_length` 按 UTF-8 字符数检查；
-- `max_bytes` 按正文中的实际字节数检查；
-- `non_blank = true` 拒绝空字符串和全空白字符串；
-- `trimmed = true` 要求字符串首尾没有空白字符。
-
-### 3.4 响应 schema
-
-成功和错误响应分别配置，不要让不同状态码共用一个不准确的宽泛 schema。
-
-```lua
-service_a_success_response = {
-  type = "object",
-  additional_properties = false,
-  required = { "query", "results" },
-  properties = {
-    query = { type = "string", min_length = 1, max_length = 4000 },
-    results = {
+    page = { type = "integer", minimum = 1, maximum = 1000 },
+    enabled = { type = "boolean" },
+    keyword = { type = "string", max_length = 200, max_bytes = 800 },
+    tag = {
       type = "array",
-      max_items = 20,
-      items = {
-        type = "object",
-        additional_properties = false,
-        required = { "id", "title" },
-        properties = {
-          id = { type = "integer", minimum = 1 },
-          title = { type = "string", min_length = 1, max_length = 500 },
+      max_items = 10,
+      items = { type = "string", max_bytes = 64 },
+    },
+  },
+}
+```
+
+规则引用：
+
+```lua
+request = {
+  query_schema = "document_list_query",
+}
+```
+
+WAF 严格 percent 解码、拒绝非法转义和控制字符，将 integer/number/boolean 转为对应类型后执行
+schema 校验，再按字段名排序重新编码。标量参数重复会拒绝；只有声明为有界 array 的参数可重复。
+未配置 `query_schema` 的接口继续拒绝任何 Query，包括单独的 `?`。
+
+### 4.3 请求头和认证
+
+```lua
+auth_policy = "bearer",
+request = {
+  headers = {
+    ["x-tenant-id"] = {
+      required = true,
+      schema = {
+        type = "string",
+        format = "slug",
+        min_length = 1,
+        max_bytes = 64,
+      },
+    },
+    ["idempotency-key"] = {
+      required = false,
+      schema = { type = "string", format = "uuid", max_bytes = 64 },
+    },
+  },
+}
+```
+
+客户端原始头在代理前全部清除，只重新写入规则声明的头和认证策略准许的凭证。Host、Content-Type、
+Content-Length、Accept、Accept-Encoding、Connection、trace 等由 WAF/Nginx 管理，不能在业务规则
+中覆盖。凭证值不会写入 `forward_header_names` 之外的审计字段。
+
+### 4.4 JSON 请求与响应（默认推荐）
+
+```lua
+{
+  id = "DOCUMENT-CREATE",
+  host = "api.example.internal",
+  methods = { "POST" },
+  path = "/documents",
+  transport = "buffered",
+  auth_policy = "bearer",
+  request = {
+    body = {
+      mode = "json",
+      required = true,
+      media_types = { "application/json" },
+      schema = "document_create_request",
+      max_body_bytes = 262144,
+    },
+  },
+  responses = {
+    [201] = {
+      body = {
+        mode = "json",
+        media_types = { "application/json" },
+        schema = "document_create_response",
+        max_body_bytes = 262144,
+      },
+      headers = {
+        ["etag"] = {
+          required = false,
+          schema = { type = "string", format = "header_value", max_bytes = 256 },
+        },
+      },
+    },
+    [400] = {
+      body = {
+        mode = "json",
+        media_types = { "application/json" },
+        schema = "error_response",
+        max_body_bytes = 16384,
+      },
+    },
+  },
+}
+```
+
+buffered JSON 会被解析、校验并重新编码，消除重复键之外的多重表示；上游响应在完整校验通过前不会
+返回调用方。每个可能状态必须单独登记，不能用范围或默认响应兜底。
+
+### 4.5 文本和小型二进制
+
+UTF-8 文本使用 `mode = "text"` 并引用 string schema。小于等于 1 MiB 的 PDF、图片或其它二进制
+可以在 buffered 模式使用：
+
+```lua
+body = {
+  mode = "binary",
+  media_types = { "application/pdf" },
+  max_body_bytes = 1048576,
+  audit_body = false,
+}
+```
+
+二进制不做 JSON schema 校验，但仍校验状态、精确媒体类型、Content-Encoding 和大小。建议
+`audit_body=false`，只记录字节数和 SHA-256。
+
+### 4.6 文件上传、下载和 SSE
+
+超过 buffered 上限或需要实时输出时，必须显式使用 stream：
+
+```lua
+{
+  id = "DOCUMENT-DOWNLOAD",
+  host = "api.example.internal",
+  methods = { "GET" },
+  path_template = "/documents/{document_id}/content",
+  path_parameters = {
+    document_id = { type = "string", format = "uuid" },
+  },
+  transport = "stream",
+  timeout_profile = "long",
+  auth_policy = "bearer",
+  responses = {
+    [200] = {
+      body = {
+        mode = "stream",
+        media_types = { "application/pdf", "application/octet-stream" },
+        max_body_bytes = 67108864,
+        audit_body = false,
+      },
+      headers = {
+        ["content-disposition"] = {
+          required = true,
+          schema = { type = "string", format = "header_value", max_bytes = 1024 },
         },
       },
     },
   },
 }
+```
 
-service_a_error_response = {
-  type = "object",
-  additional_properties = false,
-  required = { "detail" },
-  properties = {
-    detail = { type = "string", min_length = 1, max_length = 1000 },
-  },
+SSE 将媒体类型改为 `text/event-stream`。multipart 上传使用 request body：
+
+```lua
+body = {
+  mode = "binary",
+  required = true,
+  media_types = { "multipart/form-data" },
+  max_body_bytes = 67108864,
+  audit_body = false,
 }
 ```
 
-上游返回未登记状态码、未知字段、错误类型或超限正文时，WAF 返回 502，不把原始上游响应返回给调用方。
+stream 在响应头发送前校验状态、媒体类型、声明响应头和 Content-Length；对 chunked/SSE 持续计算
+响应字节数和 SHA-256，超过上限立即截断。落入 Nginx 临时文件的大型上传为避免同步读盘阻塞
+worker，请求审计记录大小和 `not_computed_stream_file`，不计算文件 SHA-256。由于流式数据已逐段发给
+客户端，WAF 无法在发送前验证完整响应正文；这是显式安全偏离，不能把普通 JSON API 随意改为
+stream。
 
-### 3.5 支持的 schema 配置
+## 5. 技术硬上限
 
-| 类型 | 可用配置 |
-|---|---|
-| 通用 | `type`、`enum` |
-| object | `required`、`properties`、`additional_properties`、`max_properties` |
-| array | `items`、`min_items`、`max_items` |
-| string | `min_length`、`max_length`、`max_bytes`、`non_blank`、`trimmed`、`prefix`、`format` |
-| integer/number | `minimum`、`maximum` |
-
-`format` 当前支持：
-
-| 值 | 含义 |
-|---|---|
-| `uuid` | UUID 字符串 |
-| `relative_path` | 不以 `/` 开头，且不包含 `.`、`..`、反斜杠或重复斜杠的相对路径 |
-| `absolute_path` | 以 `/` 开头的受限绝对路径 |
-| `filename` | 不包含斜杠、反斜杠和控制字符的文件名 |
-
-未知关键字、缺失 schema 引用、重复路由或不合法范围会导致规则检查失败。
-
-### 3.6 完整双 Host 示例
-
-仓库文件 `conf/waf_rules_same_path_example.lua` 展示了两个 Host 使用相同 method/path、不同请求和响应 schema 的完整配置。只能参考结构，生产字段必须按真实接口填写。
-
-### 3.7 检查规则
-
-开发机执行：
-
-```bash
-make lint
-make test
-```
-
-服务器执行：
-
-```bash
-cd /opt/openresty-waf
-/data/openresty/luajit/bin/luajit scripts/check_rules.lua conf/waf_rules.lua
-sha256sum conf/waf_rules.lua
-```
-
-要求：
-
-- 规则检查为 `0 error`；
-- 当前正式规则必须输出 `0 error, 5 warning`；warning 分别来自检索 metadata、资产
-  raw document metadata、图谱请求/响应 parameters 和图谱 rows 的动态对象；同时列出
-  五条 BY-002 规则；
-- 蓝、黄节点的 `waf_rules.lua` SHA-256 一致。
-
-## 4. 配置蓝 WAF
-
-部署包已携带 `conf/nginx-blue.conf`，无需复制模板或重新填写现场值。
-
-固定配置与通用模板占位符的对应关系如下，仅在审批后的现场值发生变化时使用：
-
-| 占位符 | 填写内容 |
-|---|---|
-| `__BLUE_WAF_LISTEN_IP__` | 蓝 WAF 本机监听 IP |
-| `__BLUE_WAF_LISTEN_PORT__` | 蓝 WAF 监听端口 |
-| `__WAF_SERVICE_HOST_A__` | 业务 Host A，必须与规则 `host` 一致 |
-| `__WAF_SERVICE_HOST_B__` | 业务 Host B，必须与规则 `host` 一致 |
-| `__YELLOW_WAF_IP__` | 黄 WAF 的登记 IP |
-| `__YELLOW_WAF_PORT__` | 黄 WAF 的登记端口 |
-
-蓝端配置中的关键关系：
-
-```text
-server_name Host-A Host-B
-        ↓ 保留原始业务 Host
-yellow_waf = 黄 WAF 固定 IP:端口
-```
-
-不要修改以下行为：
-
-- 未匹配业务 Host 的默认虚拟主机返回 444；
-- `location /` 进入 Lua 请求和响应校验；
-- `/__waf_upstream/` 必须保持 `internal`；
-- 转发黄 WAF 时必须使用原始业务 Host。
-
-## 5. 配置黄 WAF
-
-部署包已携带 `conf/nginx-yellow.conf`，无需复制模板或重新填写现场值。
-
-固定配置与通用模板占位符的对应关系如下，仅在审批后的现场值发生变化时使用：
-
-| 占位符 | 填写内容 |
-|---|---|
-| `__YELLOW_WAF_LISTEN_IP__` | 黄 WAF 本机监听 IP |
-| `__YELLOW_WAF_PORT__` | 黄 WAF 监听端口 |
-| `__WAF_SERVICE_HOST_A__` | 业务 Host A，必须与规则和蓝端一致 |
-| `__WAF_SERVICE_HOST_B__` | 业务 Host B，必须与规则和蓝端一致 |
-| `__PROTECTED_SERVICE_A_IP__` | 后端 A 的固定 IP |
-| `__PROTECTED_SERVICE_A_PORT__` | 后端 A 的固定端口 |
-| `__PROTECTED_SERVICE_A_HOST__` | 后端 A 实际要求的 Host |
-| `__PROTECTED_SERVICE_B_IP__` | 后端 B 的固定 IP |
-| `__PROTECTED_SERVICE_B_PORT__` | 后端 B 的固定端口 |
-| `__PROTECTED_SERVICE_B_HOST__` | 后端 B 实际要求的 Host |
-
-黄端固定映射：
-
-```text
-业务 Host A → protected_backend_a → 后端 A IP:端口，发送后端 A Host
-业务 Host B → protected_backend_b → 后端 B IP:端口，发送后端 B Host
-```
-
-`__PROTECTED_SERVICE_*_HOST__` 填后端实际要求的 Host。只有确认后端接受 IP Host 时才填写 IP。
-
-不要把调用方提供的 URL、Host 或 IP 动态用于 `proxy_pass`。两个后端都必须在模板中固定配置。
-
-## 6. 公共 Nginx 配置
-
-`conf/waf-http-common.conf` 的主要参数：
-
-| 配置 | 当前值 | 说明 |
+| 项目 | V2 硬上限 | 位置 |
 |---|---:|---|
-| `client_body_buffer_size` | `128k` | 请求体内存缓冲，容纳最长 20000 字符的 Cypher |
-| `client_max_body_size` | `128k` | Nginx 请求体硬上限 |
-| `subrequest_output_buffer_size` | `1m` | 上游响应完整捕获硬上限 |
-| `underscores_in_headers` | `off` | 不接受带下划线的请求头名称 |
-| `merge_slashes` | `on` | 合并重复路径斜杠 |
+| Query | 32 KiB | Lua 体检；活动配置为 8 KiB |
+| buffered 请求 | 1 MiB | Lua 体检 |
+| buffered 响应 | 1 MiB | `subrequest_output_buffer_size 1m` |
+| stream 请求 | 64 MiB | `client_max_body_size 64m` |
+| stream 响应 | 256 MiB | Lua body filter |
 
-`conf/waf-internal-proxy-common.conf` 的主要参数：
+规则中的 `max_body_bytes` 必须小于等于对应全局限制。提高以上硬上限需要容量、安全和审计评审，
+不能只改一行规则。
 
-| 配置 | 当前值 |
-|---|---:|
-| 连接超时 | `5s` |
-| 发送超时 | `30s` |
-| 读取超时 | `60s` |
-| 请求头 | 不转发客户端原始请求头，只重建必要头 |
-| `Content-Type` | `application/json` |
-| `Accept-Encoding` | 空，要求上游返回未压缩内容 |
-| 追踪头 | `X-WAF-Trace-ID` |
+超过 128 KiB 的请求可能落入 `/data/openresty-waf/client_body_temp`。`server-setup.sh` 会以 WAF
+运行用户创建 0700 目录，systemd service 只额外开放该目录写权限；不要改到可被普通用户读取的
+共享临时目录。
 
-修改请求或响应硬上限时，需要同时检查 `waf_rules.lua`、Nginx 缓冲和 Lua 规则检查上限，不能只改一个文件。
+## 6. V2 首次整体升级
 
-检查所有占位符已经替换：
+### 6.1 部署包
+
+包名：`openresty-waf-v2-20260804.tgz`。上线前在交付机和两台 WAF 分别执行：
 
 ```bash
-grep -En '__[A-Z0-9_]+__' /opt/openresty-waf/conf/nginx-blue.conf
-grep -En '__[A-Z0-9_]+__' /opt/openresty-waf/conf/nginx-yellow.conf
+sha256sum openresty-waf-v2-20260804.tgz
+tar -tzf openresty-waf-v2-20260804.tgz
 ```
 
-对应节点的命令必须无输出。
+包内顶层目录为 `openresty-waf/`。必须整体保留目录结构；不要只挑一个 Lua 文件覆盖 V1。
 
-## 7. 审计日志配置
+### 6.2 升级顺序
 
-日志文件：
+1. 确认变更单、四层 ACL、回滚包、日志转储和后端健康状态；
+2. 先升级黄 WAF并验收；
+3. 再升级蓝 WAF并验收；
+4. 验证蓝、黄审计日志可用同一 `trace_id` 关联；
+5. 保留旧包和旧配置，直至观察期结束。
 
-```text
-/data/openresty-waf/audit/access.log
-/data/openresty-waf/audit/rejected.log
-/data/openresty-waf/log/error.log
-```
+### 6.3 每个节点的校验
 
-`access.log` 是 JSON Lines，每行记录一次业务请求。主要字段：
-
-| 字段 | 内容 |
-|---|---|
-| `node_role` | `blue` 或 `yellow` |
-| `local_request_id` | 当前节点生成的请求 ID |
-| `trace_id` | 蓝、黄链路关联 ID |
-| `remote_addr` | 当前节点看到的来源地址 |
-| `request_host` | 规则匹配使用的业务 Host |
-| `method`、`path` | 请求方法和路径 |
-| `rule_id` | 命中的规则 ID |
-| `action`、`reason`、`field` | 放行/拒绝结果和原因 |
-| `request_body` | 收到的原始请求体全文 |
-| `forward_body` | JSON 规范化后实际发往下一跳的请求体全文 |
-| `request_body_bytes`、`request_body_sha256` | 原始请求体大小和摘要 |
-| `forward_body_bytes`、`forward_body_sha256` | 转发请求体大小和摘要 |
-| `upstream_addr`、`upstream_status` | 上游地址和状态码 |
-| `response_schema` | 当前状态码使用的响应 schema |
-| `response_body` | 原始上游响应体全文 |
-| `forward_response_body` | 实际返回调用方的响应体全文 |
-| `response_body_bytes`、`response_body_sha256` | 原始上游响应大小和摘要 |
-| `forward_response_bytes`、`forward_response_sha256` | 实际返回响应大小和摘要 |
-
-正文不脱敏、不采样、不做字段过滤。`escape=json` 只负责转义换行、引号和控制字符，日志中的正文内容仍是完整原文。
-
-未命中业务 Host 的请求写入 `rejected.log`，其中包含原始 `request_body`；444 响应没有正文。
-
-查看日志：
+以下命令在解压后的 `/opt/openresty-waf` 执行；`NODE_ROLE` 分别使用 `yellow` 或 `blue`：
 
 ```bash
-sudo tail -n 20 /data/openresty-waf/audit/access.log
-sudo tail -n 20 /data/openresty-waf/audit/rejected.log
+/data/openresty/luajit/bin/luajit scripts/check_rules.lua \
+  conf/waf_rules.lua conf/waf_routes.lua conf/waf_policies.lua
+
+/data/openresty/bin/openresty -p /opt/openresty-waf/ \
+  -c conf/nginx-${NODE_ROLE}.conf -t
 ```
 
-如果服务器安装了 `jq`：
+活动知识库配置预期为 `0 error, 5 warning`。5 个 warning 只允许来自接口文档明确声明为动态对象的
+metadata、parameters 和 graph rows。出现其它 warning 或任何 error 均停止上线。
+
+通过后：
 
 ```bash
-sudo tail -n 1 /data/openresty-waf/audit/access.log | jq .
+systemctl restart openresty-waf@${NODE_ROLE}
+systemctl status openresty-waf@${NODE_ROLE} --no-pager
 ```
 
-当前正文日志与白名单台账 `BY-002` 的原文日志禁止项冲突；部署记录中必须保留该偏离。正文会明显增加磁盘使用量，需要配置日志轮转、留存和转储。
+首次 V2 升级使用 restart，确保旧 worker 不再加载 V1 模块。后续纯配置变更使用 reload。
 
-## 8. 生成部署包
+## 7. 后续只改配置的发布流程
 
-在仓库根目录执行：
+### 7.1 本地/交付侧
+
+1. 根据接口文档修改 `waf_rules.lua`；
+2. 新 Host 或下一跳变化时同步修改 `waf_routes.lua`；
+3. 需要现有认证/只读策略时只引用名称；确需新内置模式时才评审运行时；
+4. 执行 `make lint`、`make test`、`git diff --check`；
+5. 记录三份配置的 SHA-256、变更规则 ID、正向和拒绝用例。
+
+### 7.2 服务器侧
+
+只替换实际修改的配置，但三份必须一起体检：
 
 ```bash
-make test
-make lint
-bash scripts/package.sh openresty-waf.tgz
-shasum -a 256 openresty-waf.tgz
+/data/openresty/luajit/bin/luajit /opt/openresty-waf/scripts/check_rules.lua \
+  /opt/openresty-waf/conf/waf_rules.lua \
+  /opt/openresty-waf/conf/waf_routes.lua \
+  /opt/openresty-waf/conf/waf_policies.lua
+
+/data/openresty/bin/openresty -p /opt/openresty-waf/ \
+  -c conf/nginx-${NODE_ROLE}.conf -t
+
+systemctl reload openresty-waf@${NODE_ROLE}
 ```
 
-检查包内容：
+仍按黄先蓝后的顺序。蓝、黄三个配置文件的 SHA-256 应分别一致，因为同一文件内同时保存两个节点
+角色的规则和路由。
 
-```bash
-tar -tzf openresty-waf.tgz
-```
+## 8. 验收
 
-部署包必须包含：
+每条新规则至少覆盖：
 
-```text
-openresty-waf/conf/nginx-blue.conf
-openresty-waf/conf/nginx-yellow.conf
-openresty-waf/conf/nginx-blue.conf.template
-openresty-waf/conf/nginx-yellow.conf.template
-openresty-waf/conf/waf_rules.lua
-openresty-waf/conf/waf-audit-log-format.conf
-openresty-waf/conf/waf-audit-vars.conf
-openresty-waf/lua/waf/handler.lua
-openresty-waf/scripts/server-setup.sh
-openresty-waf/deploy/openresty-waf@.service
-openresty-waf/docs/WAF部署配置与升级手册.md
-openresty-waf/docs/BY-002图谱增强检索运维配置说明.md
-```
+- 正确 Host、method、path、Query、头、认证和正文；
+- 未登记 Host/method/path；
+- 路径参数格式错误和多余路径层级；
+- 未登记、重复、类型错误或超长 Query；
+- 缺失/非法凭证和业务头；
+- 错误 Content-Type、超大正文、非法 JSON、未知字段；
+- 未登记响应状态、媒体类型、编码、头、schema 和超大响应；
+- 蓝、黄两跳同一 `trace_id`；
+- 绕过 WAF 直连后端应被四层策略拒绝。
 
-交付时记录包名和 SHA-256，蓝、黄节点使用同一个包。服务器收到后执行：
+stream 额外验证 Content-Length 超限、chunked 超限截断、客户端断开、长连接超时和审计字节/哈希。
 
-```bash
-sha256sum /tmp/openresty-waf.tgz
-```
+## 9. 回滚
 
-结果必须与交付记录一致。
+配置变更回滚：恢复三份配置的上一批准版本，先黄后蓝执行体检、`openresty -t` 和 reload。
 
-## 9. 全新部署
+V2 首次升级回滚：恢复完整 V1 目录/包及服务单元，先黄后蓝 restart。不要把 V1 的
+`waf_rules.lua` 与 V2 Lua/Nginx 混用，也不要只恢复单个 handler 文件。
 
-### 9.1 解压
+回滚后必须验证：合法请求恢复、拒绝用例仍拒绝、后端不可绕过、审计持续写入。
 
-```bash
-sudo mkdir -p /opt
-sudo tar -xzf /tmp/openresty-waf.tgz -C /opt
-cd /opt/openresty-waf
-```
+## 10. 仍需代码评审的边界
 
-### 9.2 核对节点配置
+V2 已覆盖普通 JSON/text/binary API、多路径参数、Query、头、常见凭证透传、文件和 SSE。以下变化
+不能安全地假装成任意配置：
 
-部署包已经携带固定的 `nginx-blue.conf` 和 `nginx-yellow.conf`，不要再从模板复制或手工填写。
-上线前只需核对文件中的固定值仍与已审批现场一致，并确认包内正式 `waf_rules.lua` 未被
-现场旧文件覆盖。两端 `waf_rules.lua` 必须一致，且应列出五条 BY-002 知识库接口规则。
+- 新的自定义签名算法或密钥管理方式；
+- 未内置的业务语义解析器；
+- HTTPS/mTLS 下一跳和证书信任链；
+- WebSocket、任意 TCP 或协议升级；
+- 超过 64 MiB 请求或 256 MiB 响应；
+- 需要内容杀毒、DLP、文件解包或恶意格式检测。
 
-### 9.3 创建目录并检查配置
-
-黄节点：
-
-```bash
-sudo NODE_ROLE=yellow bash scripts/server-setup.sh
-```
-
-蓝节点：
-
-```bash
-sudo NODE_ROLE=blue bash scripts/server-setup.sh
-```
-
-脚本会创建审计和运行日志目录，并检查规则、占位符和 OpenResty 配置。
-
-### 9.4 安装 systemd 单元
-
-```bash
-sudo install -o root -g root -m 0644 \
-  /opt/openresty-waf/deploy/openresty-waf@.service \
-  /etc/systemd/system/openresty-waf@.service
-sudo systemctl daemon-reload
-```
-
-SELinux 为 Enforcing 时，再按现场策略配置 `/opt/openresty-waf`、`/data/openresty-waf` 的文件上下文及监听端口。
-
-### 9.5 启动
-
-先启动黄端：
-
-```bash
-sudo systemctl enable --now openresty-waf@yellow
-sudo systemctl status openresty-waf@yellow --no-pager
-```
-
-再启动蓝端：
-
-```bash
-sudo systemctl enable --now openresty-waf@blue
-sudo systemctl status openresty-waf@blue --no-pager
-```
-
-## 10. 升级现有部署
-
-本版本修改了 Lua、Nginx 模板、审计变量和日志格式，蓝、黄节点都要使用新部署包整体升级，不能只替换 `handler.lua` 或日志格式文件。
-
-### 10.1 预装新版本
-
-蓝、黄节点分别执行：
-
-```bash
-WAF_RELEASE_ID='填写发布编号'
-WAF_RELEASE_DIR="/opt/openresty-waf-${WAF_RELEASE_ID}"
-WAF_PACKAGE='/tmp/openresty-waf.tgz'
-
-test ! -e "$WAF_RELEASE_DIR"
-sudo install -d -o root -g nobody -m 0750 "$WAF_RELEASE_DIR"
-sudo tar -xzf "$WAF_PACKAGE" --strip-components=1 -C "$WAF_RELEASE_DIR"
-```
-
-在新目录中：
-
-1. 核对部署包自带的本节点固定 `.conf` 与已审批现场值一致；
-2. 写入正式 `waf_rules.lua`；
-3. 不要把旧版 Nginx 配置整体覆盖到新目录。
-
-预检：
-
-```bash
-sudo PREFIX="$WAF_RELEASE_DIR" NODE_ROLE=yellow \
-  bash "$WAF_RELEASE_DIR/scripts/server-setup.sh"
-
-sudo PREFIX="$WAF_RELEASE_DIR" NODE_ROLE=blue \
-  bash "$WAF_RELEASE_DIR/scripts/server-setup.sh"
-```
-
-每台服务器只执行与自身角色对应的命令。
-
-### 10.2 备份
-
-蓝、黄节点分别备份当前目录：
-
-```bash
-WAF_RELEASE_ID='填写发布编号'
-WAF_NODE_ROLE='blue或yellow'
-
-sudo tar -C /opt -czf \
-  "/root/openresty-waf-before-${WAF_RELEASE_ID}-${WAF_NODE_ROLE}.tgz" \
-  openresty-waf
-```
-
-### 10.3 切换顺序
-
-1. 停止或摘除蓝 WAF，阻止新请求进入；
-2. 停止黄 WAF，保存旧目录并切换黄端新目录；
-3. 启动黄 WAF并检查；
-4. 保存蓝端旧目录并切换蓝端新目录；
-5. 启动蓝 WAF；
-6. 完成第 11 节验证后恢复流量。
-
-目录切换示例：
-
-```bash
-WAF_RELEASE_ID='填写发布编号'
-WAF_RELEASE_DIR="/opt/openresty-waf-${WAF_RELEASE_ID}"
-WAF_PREVIOUS_DIR="/opt/openresty-waf-prev-${WAF_RELEASE_ID}"
-
-test ! -e "$WAF_PREVIOUS_DIR"
-sudo mv /opt/openresty-waf "$WAF_PREVIOUS_DIR"
-sudo mv "$WAF_RELEASE_DIR" /opt/openresty-waf
-sudo install -o root -g root -m 0644 \
-  /opt/openresty-waf/deploy/openresty-waf@.service \
-  /etc/systemd/system/openresty-waf@.service
-sudo systemctl daemon-reload
-```
-
-切换前由上面的顺序停止对应服务，切换后先黄后蓝启动。SELinux Enforcing 环境还要执行 `restorecon -Rv /opt/openresty-waf`。
-
-### 10.4 回滚
-
-发生异常时：
-
-1. 先停止蓝端入口；
-2. 停止蓝、黄 WAF；
-3. 将失败的新目录改名保留；
-4. 将对应 `openresty-waf-prev-*` 恢复为 `/opt/openresty-waf`；
-5. 恢复 systemd 单元；
-6. 先启动黄端，再启动蓝端；
-7. 验证原业务恢复。
-
-不要删除失败版本目录，保留日志和配置用于排查。
-
-## 11. 配置与功能验证
-
-规则检查：
-
-```bash
-/data/openresty/luajit/bin/luajit \
-  /opt/openresty-waf/scripts/check_rules.lua \
-  /opt/openresty-waf/conf/waf_rules.lua
-```
-
-黄端 Nginx 配置：
-
-```bash
-/data/openresty/bin/openresty \
-  -p /opt/openresty-waf/ \
-  -c conf/nginx-yellow.conf \
-  -t
-```
-
-蓝端 Nginx 配置：
-
-```bash
-/data/openresty/bin/openresty \
-  -p /opt/openresty-waf/ \
-  -c conf/nginx-blue.conf \
-  -t
-```
-
-主要验收用例：
-
-| 用例 | 预期 |
-|---|---|
-| Host A + A 请求 | 只到达后端 A |
-| Host B + B 请求 | 只到达后端 B |
-| A 请求发送到 Host B | `400/422 request_body` |
-| 未登记 Host | `444` |
-| 未登记 method/path | `403 not_in_whitelist` |
-| 任意 query string | `403 query_not_allowed` |
-| 非 JSON 请求 | `415 unsupported_media_type` |
-| 非法 JSON | `400 invalid_json` |
-| 请求未知字段 | `400/422 request_body` |
-| 未登记响应状态码 | `502 response_status_not_allowed` |
-| 非 JSON 或非法响应 | `502` |
-| 响应 schema 不匹配 | `502 response_body` |
-| 请求/响应超限 | `413` 或 `502 response_body_too_large` |
-
-正文日志验证：
-
-```bash
-sudo tail -n 1 /data/openresty-waf/audit/access.log
-```
-
-确认该行同时存在且内容正确：
-
-```text
-request_body
-forward_body
-response_body
-forward_response_body
-```
-
-## 12. 常用操作
-
-查看服务：
-
-```bash
-sudo systemctl status openresty-waf@yellow --no-pager
-sudo systemctl status openresty-waf@blue --no-pager
-```
-
-重新加载：
-
-```bash
-sudo systemctl reload openresty-waf@yellow
-sudo systemctl reload openresty-waf@blue
-```
-
-查看错误日志：
-
-```bash
-sudo tail -n 100 /data/openresty-waf/log/error.log
-sudo journalctl -u openresty-waf@yellow -n 100 --no-pager
-sudo journalctl -u openresty-waf@blue -n 100 --no-pager
-```
-
-修改规则时：
-
-- 新增放行：先更新黄端并验证，再更新蓝端；
-- 删除或收紧：先更新蓝端并验证拒绝，再更新黄端；
-- 修改 Lua、Nginx 或审计配置：按第 10 节整体升级。
-
-## 13. 上线检查
-
-- [ ] 蓝、黄使用同一个部署包；
-- [ ] 蓝、黄 `waf_rules.lua` SHA-256 一致；
-- [ ] 所有 Nginx 占位符已替换；
-- [ ] 正式规则包含五条 BY-002 知识库接口规则；
-- [ ] 规则检查为 `0 error`；
-- [ ] 两端 OpenResty `-t` 成功；
-- [ ] Host A/B 分别只到达对应后端；
-- [ ] 未登记 Host、path、非 UUID 资产路径、字段和状态码均被拒绝；
-- [ ] 四个正文日志字段均有实际内容；
-- [ ] 日志轮转、容量和留存已配置；
-- [ ] 回滚目录和旧包可用。
+这些情况需要明确需求和安全评审；不得通过 `additional_properties=true`、超大 stream 或任意后端
+URL 绕过现有门禁。

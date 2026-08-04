@@ -8,14 +8,16 @@ describe("operations-managed WAF rules", function()
   end)
 
   it("loads and passes static lint", function()
-    assert.are.equal(0, lint.count(lint.lint(config), "error"))
+    local fixtures = require("spec.fixtures")
+    assert.are.equal(0, lint.count(lint.lint(config,
+      fixtures.config_routes(), fixtures.policies()), "error"))
   end)
 
   it("ships all five documented knowledge routes for the confirmed host", function()
     local active = require("spec.fixtures").active_config()
     local expected = {
       ["POST /ai/knowledge/search"] = "knowledge_search_request",
-      ["GET /ai/knowledge/assets/{uuid}"] = false,
+      ["GET /ai/knowledge/assets/{asset_id}"] = false,
       ["GET /ai/knowledge/health"] = false,
       ["POST /ai/knowledge/graph/query"] = "knowledge_graph_query_request",
       ["GET /ai/knowledge/graph/health"] = false,
@@ -26,18 +28,22 @@ describe("operations-managed WAF rules", function()
       local key = rule.methods[1] .. " " .. (rule.path or rule.path_template)
       assert.is_not_nil(expected[key])
       if expected[key] == false then
-        assert.is_nil(rule.request_schema)
+        assert.is_nil(rule.request and rule.request.body)
       else
-        assert.are.equal(expected[key], rule.request_schema)
+        assert.are.equal(expected[key], rule.request.body.schema)
+        assert.is_false(rule.request.body.audit_body == true)
+      end
+      for _, response in pairs(rule.responses) do
+        assert.is_false(response.body.audit_body == true)
       end
       expected[key] = nil
     end
     assert.is_nil(next(expected))
-    assert.is_nil(active.version)
-    assert.is_nil(active.direction)
-    assert.are.equal(131072, active.max_request_body_bytes)
-    assert.are.equal(1048576, active.max_response_body_bytes)
-    local issues = lint.lint(active)
+    assert.are.equal(2, active.version)
+    assert.are.equal(1048576, active.limits.max_buffered_request_body_bytes)
+    assert.are.equal(1048576, active.limits.max_buffered_response_body_bytes)
+    local fixtures = require("spec.fixtures")
+    local issues = lint.lint(active, fixtures.active_routes(), fixtures.policies())
     assert.are.equal(0, lint.count(issues, "error"))
     assert.are.equal(5, lint.count(issues, "warn"))
   end)
@@ -48,7 +54,7 @@ describe("operations-managed WAF rules", function()
     local decision = require("waf.factory").build_decision(active, {
       null_value = fixtures.json.null,
       array_mt = fixtures.json.array_mt,
-    })
+    }, fixtures.policies())
 
     local search = {
       host = "kb.pxsemic.tech",
@@ -119,8 +125,10 @@ describe("operations-managed WAF rules", function()
     assert.are.equal("request_body", decision:evaluate(graph).reason)
     graph.body = fixtures.graph_query_request({ unknown = true })
     assert.are.equal("request_body", decision:evaluate(graph).reason)
+    graph.body = fixtures.graph_query_request({ cypher = "MATCH (n) DELETE n" })
+    assert.are.equal("request_policy", decision:evaluate(graph).reason)
     graph.body = { cypher = string.rep("中", 20000) }
-    assert.are.equal("allow", decision:evaluate(graph).action)
+    assert.are.equal("request_policy", decision:evaluate(graph).reason)
     graph.body = { cypher = string.rep("中", 20001) }
     assert.are.equal("request_body", decision:evaluate(graph).reason)
 
@@ -144,7 +152,7 @@ describe("operations-managed WAF rules", function()
     assert.are.equal("GET", config.whitelist[1].methods[1])
     assert.are.equal("/ai/knowledge/health", config.whitelist[1].path)
     assert.are.equal("POST", config.whitelist[2].methods[1])
-    assert.are.equal("knowledge_search_request", config.whitelist[2].request_schema)
+    assert.are.equal("knowledge_search_request", config.whitelist[2].request.body.schema)
     assert.are.equal("127.0.0.1", config.whitelist[1].host)
     assert.are.equal("127.0.0.1", config.whitelist[2].host)
   end)
@@ -154,8 +162,8 @@ describe("operations-managed WAF rules", function()
     assert.truthy(config.schemas.knowledge_health_response)
     assert.truthy(config.schemas.knowledge_search_response)
     assert.truthy(config.schemas.knowledge_error_response)
-    assert.are.equal("knowledge_search_response", config.whitelist[2].responses[200].schema)
-    assert.are.equal("knowledge_error_response", config.whitelist[2].responses[422].schema)
+    assert.are.equal("knowledge_search_response", config.whitelist[2].responses[200].body.schema)
+    assert.are.equal("knowledge_error_response", config.whitelist[2].responses[422].body.schema)
   end)
 
   it("keeps unknown request fields closed", function()
@@ -170,8 +178,9 @@ describe("operations-managed WAF rules", function()
     assert.are.equal(same_path.whitelist[1].path, same_path.whitelist[2].path)
     assert.are.equal(same_path.whitelist[1].methods[1], same_path.whitelist[2].methods[1])
     assert.is_false(same_path.whitelist[1].host == same_path.whitelist[2].host)
-    assert.is_false(same_path.whitelist[1].request_schema == same_path.whitelist[2].request_schema)
-    assert.is_false(same_path.whitelist[1].responses[200].schema
-      == same_path.whitelist[2].responses[200].schema)
+    assert.is_false(same_path.whitelist[1].request.body.schema
+      == same_path.whitelist[2].request.body.schema)
+    assert.is_false(same_path.whitelist[1].responses[200].body.schema
+      == same_path.whitelist[2].responses[200].body.schema)
   end)
 end)

@@ -9,7 +9,7 @@ describe("decision", function()
     decision = factory.build_decision(fixtures.config(), {
       null_value = fixtures.json.null,
       array_mt = fixtures.json.array_mt,
-    })
+    }, fixtures.policies())
   end)
 
   local function request(overrides)
@@ -88,7 +88,7 @@ describe("decision", function()
     local isolated = factory.build_decision(fixtures.same_path_config(), {
       null_value = fixtures.json.null,
       array_mt = fixtures.json.array_mt,
-    })
+    }, fixtures.policies())
     local a = {
       host = "service-a.example.internal", method = "POST", path = "/ai/knowledge/search",
       body_present = true, headers = {}, body = { query = "q" },

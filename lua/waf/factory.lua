@@ -2,10 +2,11 @@
 local UrlFilter = require("waf.url_filter")
 local JsonValidator = require("waf.json_validator")
 local Decision = require("waf.decision")
+local PolicyEngine = require("waf.policy_engine")
 
 local factory = {}
 
-function factory.build_decision(config, opts)
+function factory.build_decision(config, opts, policies)
   config = config or {}
   opts = opts or {}
   local validators = {}
@@ -18,6 +19,7 @@ function factory.build_decision(config, opts)
   return Decision.new({
     whitelist = UrlFilter.new(config.whitelist or {}),
     validators = validators,
+    policy_engine = PolicyEngine.new(policies or {}, opts),
   })
 end
 
